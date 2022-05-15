@@ -1,5 +1,13 @@
 # lane-changing-carla
 
+## Running
+
+### Starting the CARLA server
+
+You can start the CARLA server by executing: 
+
+    $ sh ./start-server.sh
+
 ## How to collaborate
 
 There are two persistent branches: __main__ and __dev__. __main__ is the current working/demo version, and __dev__ is the development branch.
