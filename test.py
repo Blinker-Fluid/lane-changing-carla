@@ -13,20 +13,24 @@ my_vehicle = world.spawn_actor(vehicle_bp, random_spawn_points[0])
 vel = vehicle.get_velocity()
 
 # Function to preprocess images from camera sensor
-def process_img(self, image):
+im_width = 640
+im_height = 480
+SHOW_CAM = False
+
+def process_img(image):
     i = np.array(image.raw_data)
     #print(i.shape)
-    i2 = i.reshape((self.im_height, self.im_width, 4))
+    i2 = i.reshape((im_height, im_width, 4))
     i3 = i2[:, :, :3]
-    if self.SHOW_CAM:
+    if SHOW_CAM:
         cv2.imshow("", i3)
         cv2.waitKey(1)
-    self.front_camera = i3
+    front_camera = i3
 
 # Attach a camera sensor
 cam_blp = world.get_blueprint_library().find('sensor.camera.rgb')
-cam_blp.set_attribute('image_size_x', '1920')
-cam_blp.set_attribute('image_size_y', '1080')
+cam_blp.set_attribute('image_size_x', f'{im_width}')
+cam_blp.set_attribute('image_size_y', f'{im_height}')
 cam_blp.set_attribute('fov', '110')
 cam_blp.set_attribute('sensor_tick', '1.0')
 transform = carla.Transform(carla.Location(x=0.8, z=1.7))
