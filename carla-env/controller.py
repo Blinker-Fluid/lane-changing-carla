@@ -182,7 +182,7 @@ class PIDLateralController():
     def run_step(self, waypoint):
         """
         Execute one step of lateral control to steer
-        the vehicle towards a certain waypoin.
+        the vehicle towards a certain waypoint.
             :param waypoint: target waypoint
             :return: steering control in the range [-1, 1] where:
             -1 maximum steering to left
