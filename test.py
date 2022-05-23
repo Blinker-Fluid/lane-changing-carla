@@ -2,6 +2,7 @@ import carla
 import numpy as np
 import random
 import math
+import cv2
 
 client = carla.Client("localhost", 2223)
 world = client.load_world('Town06')
