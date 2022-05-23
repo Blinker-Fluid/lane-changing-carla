@@ -42,9 +42,9 @@ sensor.listen(lambda data: process_img(data))
 waypoints_left_front = waypoint.get_left_lane(60)
 waypoints_center_front = waypoint.next(60)
 waypoints_right_front = waypoint.get_right_lane(60)
-waypoints_left_behind = waypoint.get_left_lane(30)
+waypoints_left_behind = waypoint.get_left_lane(30) # not sure how to get previous 30 on other lanes
 waypoints_center_behind = waypoint.previous(30)
-waypoints_right_behind = waypoint.get_right_lane(30)
+waypoints_right_behind = waypoint.get_right_lane(30) # not sure how to get previous 30 on other lanes
 
 # get ego car's speed
 car_speed = 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2) # in Km/h
