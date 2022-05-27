@@ -4,7 +4,7 @@ from collections import deque
 import math
 import numpy as np
 import carla
-from managers.misc import get_speed
+from carla_env.managers.misc import get_speed
 
 
 class VehiclePIDController():
