@@ -4,8 +4,9 @@ import random
 import math
 import cv2
 import matplotlib.pyplot as plt
+from carla_env.controller import *
 
-client = carla.Client("localhost", 1506)
+client = carla.Client("localhost", 1555)
 world = client.load_world('Town04')
 world = client.get_world()
 print(world.get_map())
@@ -23,6 +24,14 @@ sp = carla.Transform(carla.Location(x=12.258620, y=68.035088, z=0.281942),
                      carla.Rotation(pitch=0.000000, yaw=-90.289116, roll=0.000000))
 my_vehicle = world.spawn_actor(vehicle_bp, sp)
 vel = my_vehicle.get_velocity()
+
+# world.tick()
+# world_snapshot = world.wait_for_tick()
+# actor_snapshot = world_snapshot.find(my_vehicle.id)
+# # spectator point of view
+# spectator = world.get_spectator()
+# transform = my_vehicle.get_transform()
+# spectator.set_transform(carla.Transform(transform.location + carla.Location(z=50), carla.Rotation(pitch=-90)))
 
 # Function to preprocess images from camera sensor
 # im_width = 640
@@ -59,7 +68,7 @@ current_lane_waypoints = [current_lane_waypoint]
 left_lane_waypoints = [left_lane_waypoint]
 right_lane_waypoints = [right_lane_waypoint]
 
-for i in range(500):
+for i in range(10):
     if i < 0:
         current_lane_waypoints.append(
             current_lane_waypoint.previous(-i * 2)[0])
@@ -69,8 +78,8 @@ for i in range(500):
     elif i >= 0:
         current_lane_waypoints.append(
             current_lane_waypoint.next((i + 1) * 2)[0])
-        # left_lane_waypoints.append(left_lane_waypoint.next((i + 1) * 2)[0])
-        # right_lane_waypoints.append(right_lane_waypoint.next((i + 1) * 2)[0])
+        left_lane_waypoints.append(left_lane_waypoint.next((i + 1) * 2)[0])
+        right_lane_waypoints.append(right_lane_waypoint.next((i + 1) * 2)[0])
 
 X_C = [w.transform.location.x for w in current_lane_waypoints]
 Y_C = [w.transform.location.y for w in current_lane_waypoints]
@@ -80,6 +89,11 @@ Y_L = [w.transform.location.y for w in left_lane_waypoints]
 
 X_R = [w.transform.location.x for w in right_lane_waypoints]
 Y_R = [w.transform.location.y for w in right_lane_waypoints]
+
+# ego_car_lane = my_vehicle.get_location()
+# box = my_vehicle.bounding_box
+# print(box.location)         # Location relative to the vehicle.
+# print(box.extent)           # XYZ half-box extents in meters.
 
 # plt.figure()
 plt.scatter(X_C, Y_C, c="yellow", s=0.2)
@@ -98,15 +112,57 @@ car_speed = 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)  # in Km/h
 # NOTE: We don't need the frenet coordinates, we have the waypoints already. We just iterate over them.
 
 # Getting actors locations
-actor_list = world.get_actors()
+# actor_list = world.get_actors()
 # actors_locations = []
 # for actor in actor_list:
-#     actor_locations.append(actor.get_location())
+#     actors_locations.append(actor.get_location())
 
 # Check if locations of waypoints and actors overlap? (TBD)
 # get all actors
 # filter for vehicles
-# 
+
+waypoint = np.random.choice(current_lane_waypoint.next(3))
+# desiredSpeed = 25
+# control = VehiclePIDController.run_step(desiredSpeed, waypoint) 
+# my_vehicle.apply_control(control) # apply pid control 
+# world.debug.draw_point(waypoint.transform.location,size=0.3)
+
+while True:
+
+    vehicle_loc = my_vehicle.get_location()
+
+    dist = math.sqrt((waypoint.transform.location.x - vehicle_loc.x)**2 + (waypoint.transform.location.y - vehicle_loc.y)**2 )
+    desiredSpeed = 25
+
+    print ("Distance before the loop is ", dist)
+    control = VehiclePIDController.run_step(desiredSpeed, waypoint) 
+    my_vehicle.apply_control(control)
+
+    if i==(len(current_lane_waypoint)-1):
+    	print("last waypoint reached")
+    	break
+
+    if (dist<2.5):
+    	print ("The distance is less than  ", dist)  
+        #Get next way point only when the distance between our vehicle and the current                                
+        #waypoint is less than 2.5    meters 
+
+    	desiredSpeed = 25
+    	control = VehiclePIDController.run_step(desiredSpeed, waypoint) 
+    	my_vehicle.apply_control(control)
+    	i=i+1
+    	waypoint=current_lane_waypoint[i]
+
+
+# if action == 0:
+#     if current_waypoint == next_waypoint:
+#         next_waypoint = current_waypoint.next(15)[0]
+# if action == 1:
+#     if current_waypoint != next_waypoint:
+#         next_waypoint = current_waypoint.get_right_lane().next(15)[0]
+#     else:
+#         next_waypoint = current_waypoint.next(15)[0]
+#         action = 0
 
 # State representation matrix size
 state_height = 45
