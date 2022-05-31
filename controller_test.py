@@ -51,7 +51,7 @@ next_waypoint = current_waypoint.next(15)[0]
 action = 0
 
 
-for i in range(FPS * 20):
+for i in range(FPS * 100):
     location = my_vehicle.get_location()
     print(location)
     location_samples.append(location)
