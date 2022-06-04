@@ -4,7 +4,7 @@ from collections import deque
 import math
 import numpy as np
 import carla
-from managers.misc import get_speed
+from carla_env.managers.misc import get_speed
 
 
 class VehiclePIDController():
@@ -182,7 +182,7 @@ class PIDLateralController():
     def run_step(self, waypoint):
         """
         Execute one step of lateral control to steer
-        the vehicle towards a certain waypoin.
+        the vehicle towards a certain waypoint.
             :param waypoint: target waypoint
             :return: steering control in the range [-1, 1] where:
             -1 maximum steering to left
