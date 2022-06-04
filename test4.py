@@ -322,7 +322,7 @@ try:
     plt.scatter(X, Y, c="green", s=1)
     plt.scatter(X[0], Y[0], c="red", s=2)
     plt.scatter(X[-1], Y[-1], c="blue", s=2)
-    plt.savefig(datetime.now().strftime("%d_%m_%Y_%H_%M_%S") + ".png", dpi=300)
+    plt.savefig("visualizations/" + datetime.now().strftime("%d_%m_%Y_%H_%M_%S") + ".png", dpi=300)
     plt.close()
 
 finally:
