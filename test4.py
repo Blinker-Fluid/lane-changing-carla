@@ -113,8 +113,8 @@ class Player():
         self.waypointsList = [target_wp, follow_wp]
     
     def do_left_lane_change(self):
-        self.get_left_lane_waypoints()
         self.lane_index -= 1
+        self.get_left_lane_waypoints()
         for i in range(len(self.waypointsList)-1):
             self.current_pos = self.vehicle.get_location()
             self.go_to_waypoint(self.waypointsList[i])
@@ -126,16 +126,19 @@ class Player():
         self.get_right_lane_waypoints()
         for i in range(len(self.waypointsList)-1):
             self.current_pos = self.vehicle.get_location()
-            print(self.current_pos)
             self.go_to_waypoint(self.waypointsList[i])
             self.past_pos = self.current_pos
             self.update_spectator()
             
     def do_follow_lane(self):
         self.get_current_lane_waypoints()
+        ego_wp = self.world.get_map().get_waypoint(self.vehicle.get_location())
         for i in range(len(self.waypointsList)-1):
+            # check if we need to slow down
+            # set next wp at half the distance to vehicle ahead
+            # go there
+            # return
             self.current_pos = self.vehicle.get_location()
-            print(self.current_pos)
             self.go_to_waypoint(self.waypointsList[i])
             self.past_pos = self.current_pos
             self.update_spectator()
@@ -256,7 +259,7 @@ try:
     world.apply_settings(settings)
 
     blueprint_library = world.get_blueprint_library()
-    vehicle_bp = blueprint_library.filter("cybertruck")[0]
+    vehicle_bp = blueprint_library.filter("leon")[0]
     
 
     for i in range(80):
@@ -288,9 +291,11 @@ try:
         player.update_spectator()
         manoeuver = input("Enter manoeuver: ")
         if (manoeuver == "l"): # Perform left lane change
-            player.do_left_lane_change()
+            if (player.lane_index != LEFT_LANE):
+                player.do_left_lane_change()
         elif (manoeuver == "r"): # Perform right lane change
-            player.do_right_lane_change()
+            if (player.lane_index != RIGHT_LANE):
+                player.do_right_lane_change()
         elif (manoeuver == "f"): # Follow current lane
             player.do_follow_lane()
         elif (manoeuver == "s"): # Skip
