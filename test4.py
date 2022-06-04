@@ -21,7 +21,7 @@ import numpy as np
 import random
 from agents.navigation.controller import VehiclePIDController
 
-VEHICLE_VEL = 25
+VEHICLE_VEL = 15
 LEFT_LANE = 0
 CENTER_LANE = 1
 RIGHT_LANE = 2
@@ -159,13 +159,13 @@ class Player():
     def get_state_representation(self, vehicle_list = []):
         grid = np.ones((51, 3))
         ego_loc = self.vehicle.get_location()
-        ego_wp = self.vehicle.get_location()
+        ego_wp = self.world.get_map().get_waypoint(self.vehicle.get_location())
         for actor in vehicle_list:
             actor_vel = actor.get_velocity()
             actor_speed = (3.6 * math.sqrt(actor_vel.x ** 2 + actor_vel.y ** 2 + actor_vel.z ** 2)) / 100.0
             actor_loc = actor.get_location()
             dist = actor_loc.distance(ego_loc)
-            if dist > 60: pass
+            if dist > 60: continue
             
             cell_delta = int(dist // CELL_LEN)
 
@@ -173,7 +173,52 @@ class Player():
             is_behind = actor_loc.distance(previous_reference_loc) <= 15
             if is_behind: cell_delta *= -1
 
-            grid[(31 - cell_delta):(35 - cell_delta), 1] = actor_speed
+            # find actor's lane
+            actor_lane = None
+            left_lane_wp = None
+            center_lane_wp = None
+            right_lane_wp = None
+
+            if self.lane_index == LEFT_LANE:
+                left_lane_wp = ego_wp
+                center_lane_wp = ego_wp.get_right_lane()
+                right_lane_wp = center_lane_wp.get_right_lane()
+            elif self.lane_index == CENTER_LANE:
+                left_lane_wp = ego_wp.get_left_lane()
+                center_lane_wp = ego_wp
+                right_lane_wp = ego_wp.get_right_lane()
+            elif self.lane_index == RIGHT_LANE:
+                left_lane_wp = ego_wp.get_left_lane().get_left_lane()
+                center_lane_wp = ego_wp.get_left_lane()
+                right_lane_wp = ego_wp
+
+            left_lane_next_wp = left_lane_wp.previous(30)[0]
+            center_lane_next_wp = center_lane_wp.previous(30)[0]
+            right_lane_next_wp = right_lane_wp.previous(30)[0]
+
+            # TODO: we can speed this up by using "dist" for the range, but we need to handle next/previous search differently
+            for i in range(1, 95):
+                print(left_lane_next_wp.transform.location.x, left_lane_next_wp.transform.location.y)
+                print(left_lane_next_wp.transform.location)
+                print(actor_loc.distance(left_lane_next_wp.transform.location))
+                if actor_loc.distance(left_lane_next_wp.transform.location) < 1:
+                    actor_lane = LEFT_LANE
+                    break
+                elif actor_loc.distance(center_lane_next_wp.transform.location) < 1:
+                    actor_lane = CENTER_LANE
+                    break
+                elif actor_loc.distance(right_lane_next_wp.transform.location) < 1:
+                    actor_lane = RIGHT_LANE
+                    break
+            
+                left_lane_next_wp = left_lane_next_wp.next(1)[0]
+                center_lane_next_wp = center_lane_next_wp.next(1)[0]
+                right_lane__next_wp = right_lane_next_wp.next(1)[0]
+            
+            # if we didn't find the actor's lane, it must >30m behind the ego car
+            if actor_lane == None:
+                continue
+            grid[(31 - cell_delta):(35 - cell_delta), actor_lane] = actor_speed
             # TODO: Fill in the grid with actors' velocities
         vel = self.vehicle.get_velocity()
         grid[31:35, self.lane_index] = (3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)) / 100.0
@@ -181,7 +226,6 @@ class Player():
         state = np.zeros((45, 3))
         state[:, :] = grid[3:48, :]
         return state
-
 
 dt = 1.0 / 20.0
 args_lateral_dict = {'K_P': 1.95, 'K_I': 0.05, 'K_D': 0.2, 'dt': dt}
@@ -199,7 +243,9 @@ try:
 
     spectator = world.get_spectator()
     actorList.append(spectator)
-    sp0 = carla.Transform(carla.Location(x=12.007767, y=17.726641, z=0.1),
+    sp0 = carla.Transform(carla.Location(x=8.526537, y=22.726641, z=0.1),
+                        carla.Rotation(pitch=0.000000, yaw=-90.289116, roll=0.000000))
+    sp1 = carla.Transform(carla.Location(x=12.526537, y=2.726641, z=0.1),
                         carla.Rotation(pitch=0.000000, yaw=-90.289116, roll=0.000000))
     # spawn_wp = world.get_map().get_waypoint(sp0.location)
     # sp1 = spawn_wp.next(40)[0].transform
@@ -224,8 +270,14 @@ try:
     while vehicle1 is None:
         print("trying to spawn")
         vehicle1 = world.spawn_actor(vehicle_bp, sp0)
+    
+    vehicle2 = None
+    while vehicle2 is None:
+        print("trying to spawn")
+        vehicle2 = world.spawn_actor(vehicle_bp, sp1)
 
     vehicle_list.append(vehicle1)
+    vehicle_list.append(vehicle2)
 
     # INIT DQN MODEL DQNAgent = 
 
