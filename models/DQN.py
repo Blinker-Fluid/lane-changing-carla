@@ -11,11 +11,12 @@ from keras.models import Sequential, Model
 from keras.layers import Dense, GlobalAveragePooling2D, Input, concatenate, Conv2D, AveragePooling2D, Activation, Flatten
 from tensorflow.keras.optimizers import Adam
 from keras.callbacks import TensorBoard
+from tqdm import tqdm
 # import keras.backend.tensorflow_backend as backend
 from threading import Thread
 import tensorflow as tf
 import tensorflow.compat.v1 as tf
-from carla_env.env import *
+# from carla_env.new_env import *
 # tf.disable_v2_behavior()
 
 class DQNAgent:
@@ -60,18 +61,22 @@ class DQNAgent:
         # copy weights from model to target_model
         self.target_model.set_weights(self.model.get_weights())
 
-    def remember1(self, state, action, reward, next_state):
-        self.memory1.append((state, action, reward, next_state))
+    def update_replay_memory(self, transition):
+        # transition = (current_state, action, reward, new_state, done)
+        self.replay_memory.append(transition)
 
-    def remember2(self, state, action, reward, next_state):
-        self.memory2.append((state, action, reward, next_state))
+    def remember1(self, state, action, reward, next_state, done):
+        self.memory1.append((state, action, reward, next_state, done))
 
-    def remember3(self, state, action, reward, next_state):
-        self.memory3.append((state, action, reward, next_state))
+    def remember2(self, state, action, reward, next_state, done):
+        self.memory2.append((state, action, reward, next_state, done))
+
+    def remember3(self, state, action, reward, next_state, done):
+        self.memory3.append((state, action, reward, next_state, done))
 
     def act(self, state):
         if np.random.rand() <= self.epsilon:
-            print('random')
+            # print('random')
             return random.randrange(self.action_size)
         act_values = self.model.predict(state)
         return np.argmax(act_values[0])  # returns action
