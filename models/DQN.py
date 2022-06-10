@@ -16,6 +16,12 @@ from tqdm import tqdm
 from threading import Thread
 import tensorflow as tf
 import tensorflow.compat.v1 as tf
+# from keras.backend.tensorflow_backend import set_session
+# config = tf.ConfigProto()
+# config.gpu_options.per_process_gpu_memory_fraction = 0.3
+# set_session(tf.Session(config=config))
+# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
 # from carla_env.new_env import *
 # tf.disable_v2_behavior()
 
@@ -61,9 +67,9 @@ class DQNAgent:
         # copy weights from model to target_model
         self.target_model.set_weights(self.model.get_weights())
 
-    def update_replay_memory(self, transition):
-        # transition = (current_state, action, reward, new_state, done)
-        self.replay_memory.append(transition)
+    # def update_replay_memory(self, transition):
+    #     # transition = (current_state, action, reward, new_state, done)
+    #     self.memory1.append(transition)
 
     def remember1(self, state, action, reward, next_state, done):
         self.memory1.append((state, action, reward, next_state, done))
@@ -83,15 +89,18 @@ class DQNAgent:
 
     def replay(self, batch_size):
         minibatch1 = random.sample(self.memory1, int(batch_size / 2))
-        minibatch2 = random.sample(
-            self.memory2, batch_size - int(batch_size / 2))
+        minibatch2 = random.sample(self.memory2, batch_size - int(batch_size / 2))
         minibatch = minibatch1 + minibatch2
 
-        for state, action, reward, next_state in minibatch:
-            target = self.model.predict(state)
-            t = self.target_model.predict(next_state)[0]
-            target[0][action] = reward + self.gamma * np.amax(t)
-            self.model.fit(state, target, epochs=1, verbose=0)
+        for state, action, reward, next_state, done in minibatch:
+            if not done:
+                target = self.model.predict(state)
+                t = self.target_model.predict(next_state)[0]
+                target[0][action] = reward + self.gamma * np.amax(t)
+                self.model.fit(state, target, epochs=1, verbose=0)
+            else:
+                target[0][action] = reward
+
         if self.epsilon > self.epsilon_min:
             self.epsilon = max(
                 self.epsilon*self.epsilon_decay, self.epsilon_min)

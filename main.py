@@ -4,301 +4,588 @@ import os
 import time
 import random
 import math
-import pickle
 import numpy as np
 import matplotlib.pyplot as plt
-from collections import deque
 from datetime import datetime
-from keras.callbacks import TensorBoard
+
+from agents.navigation.controller import VehiclePIDController
 
 from models.DQN import *
-from carla_env.new_env import *
 
+#The added path depends on where the carla binaries are stored
+try:
+    sys.path.append(glob.glob('../../carla/dist/carla-*%d.%d-%s.egg' % (
+        sys.version_info.major,
+        sys.version_info.minor,
+        'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
+except IndexError:
+    pass
+
+import carla
+
+VEHICLE_VEL = 25
+LEFT_LANE = 0
+CENTER_LANE = 1
+RIGHT_LANE = 2
+CELL_LEN = 2.0
+STEER_AMT = 1.0
+offset = 1
+
+class Player():
+    STEER_AMT = 1.0
+
+    def __init__(self):
+        self.client = carla.Client("localhost", 1555)
+        self.client.set_timeout(10.0)
+        self.world = self.client.load_world("Town04")
+        self.blp_lib = self.world.get_blueprint_library()
+        self.model_3 = self.blp_lib.filter("model3")[0]
+        # # Spawning ego car
+        self.spectator = self.world.get_spectator()
+        self.initial_transform = carla.Transform(carla.Location(x=8.758563, y=68.032547, z=0.281942),
+                                         carla.Rotation(pitch=0.000000, yaw=-90.289116, roll=0.000000))
+
+        self.vehicle = self.world.try_spawn_actor(self.model_3, self.initial_transform)
+
+        self.lane_index = CENTER_LANE
+        self.vel_ref = VEHICLE_VEL
+        self.current_pos = self.vehicle.get_transform().location
+        self.past_pos = self.vehicle.get_transform().location
+        self.vehicle_list = []
+        self.actor_list = []
+
+
+        self.tm_port = 9500
+        tm_is_initialized = False
+        while not tm_is_initialized:
+            try:
+                self.tm = self.client.get_trafficmanager(self.tm_port)
+                self.tm.global_percentage_speed_difference(10.0)  # set the global speed limitation
+                tm_is_initialized = True
+            except Exception as err:
+                print("Caught exception during traffic manager creation: ")
+                print(err)
+                self.tm_port += 1
+                print("Trying with port {}...".format(self.tm_port))
+        # self.state = None
+
+    def reset(self):
+        self.actor_list = []
+        self.collision_hist = []
+        self.vehicle_list = []
+        self.lane_index = CENTER_LANE
+        self.vel_ref = VEHICLE_VEL
+        self.waypointsList = []
+        # self.current_pos = self.vehicle.get_transform().location
+        # self.past_pos = self.vehicle.get_transform().location
+        
+        self.settings = self.world.get_settings()
+        self.settings.synchronous_mode = True
+        self.settings.fixed_delta_seconds = 1/20
+        self.world.apply_settings(self.settings)
+
+        self.world = self.client.load_world("Town04")
+        self.world.tick()
+        
+        self.spectator = self.world.get_spectator()
+        self.vehicle = self.world.try_spawn_actor(self.model_3, self.initial_transform)
+
+        self.vehicle_list.append(self.vehicle)
+        self.actor_list.append(self.vehicle)
+        self.actor_list.append(self.spectator)
+
+        # collision sensor
+        col_sensor = self.blp_lib.find('sensor.other.collision')
+        col_transform = carla.Transform(carla.Location(0,0,0), carla.Rotation(0,0,0))
+        self.ego_col = self.world.spawn_actor(col_sensor, col_transform, attach_to=self.vehicle, attachment_type=carla.AttachmentType.Rigid)
+        self.ego_col.listen(lambda event: collision_data(event))
+
+        # lane invasion sensor
+        # lane_bp = self.blp_lib.find('sensor.other.lane_invasion')
+        # lane_transform = carla.Transform(carla.Location(0,0,0), carla.Rotation(0,0,0))
+        # self.ego_lane = self.world.spawn_actor(lane_bp, lane_transform, attach_to=self.vehicle, attachment_type=carla.AttachmentType.Rigid)
+        # self.ego_lane.listen(lambda lane: lane_callback(lane))
+
+        # obstacle sensor
+        obs_bp = self.blp_lib.find('sensor.other.obstacle')
+        obs_bp.set_attribute("only_dynamics", str(True))
+        obs_transform = carla.Transform(carla.Location(0,0,0), carla.Rotation(0,0,0))
+        self.ego_obs = self.world.spawn_actor(obs_bp, obs_transform, attach_to=self.vehicle, attachment_type=carla.AttachmentType.Rigid)
+        self.ego_obs.listen(lambda obs: obs_callback(obs))
+
+        # while self.state is None:
+        #     time.sleep(0.01)
+
+        self.episode_start = time.time()
+        self.vehicle.apply_control(carla.VehicleControl(throttle=0.0, brake=0.0))
+
+        grid = np.ones((51, 3))
+        ego_loc = self.vehicle.get_location()
+        ego_wp = self.world.get_map().get_waypoint(self.vehicle.get_location())
+        for actor in self.vehicle_list:
+            actor_vel = actor.get_velocity()
+            actor_speed = (3.6 * math.sqrt(actor_vel.x ** 2 + actor_vel.y ** 2 + actor_vel.z ** 2)) / 100.0
+            actor_loc = actor.get_location()
+            dist = actor_loc.distance(ego_loc)
+            if dist > 60: continue
+            
+            cell_delta = int(dist // CELL_LEN)
+
+            previous_reference_loc = ego_wp.previous(15)[0].transform.location
+            is_behind = actor_loc.distance(previous_reference_loc) <= 15
+            if is_behind: cell_delta *= -1
+
+            # find actor's lane
+            actor_lane = None
+            left_lane_wp = None
+            center_lane_wp = None
+            right_lane_wp = None
+
+            if self.lane_index == LEFT_LANE:
+                left_lane_wp = ego_wp
+                center_lane_wp = ego_wp.get_right_lane()
+                right_lane_wp = center_lane_wp.get_right_lane()
+            elif self.lane_index == CENTER_LANE:
+                left_lane_wp = ego_wp.get_left_lane()
+                center_lane_wp = ego_wp
+                right_lane_wp = ego_wp.get_right_lane()
+            elif self.lane_index == RIGHT_LANE:
+                left_lane_wp = ego_wp.get_left_lane().get_left_lane()
+                center_lane_wp = ego_wp.get_left_lane()
+                right_lane_wp = ego_wp
+
+            left_lane_next_wp = left_lane_wp.previous(30)[0]
+            center_lane_next_wp = center_lane_wp.previous(30)[0]
+            right_lane_next_wp = right_lane_wp.previous(30)[0]
+
+            # TODO: we can speed this up by using "dist" for the range, but we need to handle next/previous search differently
+            for i in range(1, 95):
+                # print(left_lane_next_wp.transform.location.x, left_lane_next_wp.transform.location.y)
+                # print(left_lane_next_wp.transform.location)
+                # print(actor_loc.distance(left_lane_next_wp.transform.location))
+                if actor_loc.distance(left_lane_next_wp.transform.location) < 1:
+                    actor_lane = LEFT_LANE
+                    break
+                elif actor_loc.distance(center_lane_next_wp.transform.location) < 1:
+                    actor_lane = CENTER_LANE
+                    break
+                elif actor_loc.distance(right_lane_next_wp.transform.location) < 1:
+                    actor_lane = RIGHT_LANE
+                    break
+            
+                left_lane_next_wp = left_lane_next_wp.next(1)[0]
+                center_lane_next_wp = center_lane_next_wp.next(1)[0]
+                right_lane__next_wp = right_lane_next_wp.next(1)[0]
+            
+            # if we didn't find the actor's lane, it must >30m behind the ego car
+            if actor_lane == None:
+                continue
+            grid[(31 - cell_delta):(35 - cell_delta), actor_lane] = actor_speed
+            # TODO: Fill in the grid with actors' velocities
+        vel = self.vehicle.get_velocity()
+        grid[31:35, self.lane_index] = (3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)) / 100.0
+
+        self.state = np.zeros((45, 3))
+        self.state[:, :] = grid[3:48, :]
+
+        return self.state
+
+    def step(self, action):
+        dt = 1.0 / 20.0
+        args_lateral_dict = {'K_P': 1.95, 'K_I': 0.05, 'K_D': 0.2, 'dt': dt}
+        args_longitudinal_dict = {'K_P': 1.0, 'K_I': 0.05, 'K_D': 0, 'dt': dt}
+        offset = 1
+        max_throt = 0.75
+        max_brake = 0.3
+        max_steer = 0.8
+        reward = 0
+        
+        self.controller = VehiclePIDController(self.vehicle,
+                                        args_lateral=args_lateral_dict,
+                                        args_longitudinal=args_longitudinal_dict,
+                                        # offset=offset,
+                                        max_throttle=max_throt,
+                                        max_brake=max_brake,
+                                        max_steering=max_steer)
+
+        if action == 0:
+            self.do_follow_lane()
+        elif action == 1:
+            if (self.lane_index != LEFT_LANE):
+                self.do_left_lane_change()
+            else:
+                self.do_follow_lane()
+                reward -= 5
+        elif action == 2:
+            if (self.lane_index != RIGHT_LANE):
+                self.do_right_lane_change()
+            else:
+                self.do_follow_lane()
+                reward -= 5
+
+        v = self.vehicle.get_velocity()
+        kmh = int(3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2))
+
+        if len(self.collision_hist) != 0:
+            done = True
+            reward -= 10
+        elif kmh < 50:
+            done = False
+            reward -= 1
+        else:
+            done = False
+            reward += 1
+
+        if self.episode_start + SECONDS_PER_EPISODE < time.time():
+            done = True
+
+        self.state = self.get_state_representation(self.vehicle_list)
+
+        return self.state, reward, done, None
+
+    def spawn_vehicles(self, radius, actor_spawn_points, num_vehicles):
+        np.random.shuffle(actor_spawn_points)  # shuffle all spawn points
+        ego_location = self.vehicle.get_location()
+        accessible_points = []
+        for spawn_point in actor_spawn_points:
+            dis = math.sqrt((ego_location.x-spawn_point.location.x)**2 + (ego_location.y-spawn_point.location.y)**2)
+            # it also can include z-coordinate,but it is unnecessary
+            if dis < radius:
+                # print(dis)
+                accessible_points.append(spawn_point)
+
+        # vehicle_bps = self.world.get_blueprint_library().filter('Leon')   # TODO: Might want to use the Leon
+        # vehicle_bps = [x for x in vehicle_bps if int(x.get_attribute('number_of_wheels')) == 4]  # only choose car with 4 wheels
+
+        if len(accessible_points) < num_vehicles:
+            # if your radius is relatively small,the satisfied points may be insufficient
+            num_vehicles = len(accessible_points)
+
+        for i in range(num_vehicles):  # generate the free vehicle
+            point = accessible_points[i]
+            # print(point)
+            _loc = point.location
+            point.location = carla.Location(_loc.x, _loc.y, _loc.z + 1)
+            # print(point)
+            # actors_bp = np.random.choice(vehicle_bps)
+            actors_bp = self.model_3
+            try:
+                actor_vehicle = self.world.spawn_actor(actors_bp, point)
+                print("spawned actor")
+                self.vehicle_list.append(actor_vehicle)
+                self.actor_list.append(actor_vehicle)
+                
+            except:
+                print('failed appending new vehicle actor!')  # if failed, print the hints.
+                pass
+
+        for v in self.vehicle_list:  # set every vehicle's mode
+            v.set_autopilot(True, self.tm_port)  # you can get those functions detail in carla document
+            self.tm.ignore_lights_percentage(v, 0)
+            self.tm.distance_to_leading_vehicle(v, 0.5)
+            self.tm.vehicle_percentage_speed_difference(v, -20)
+
+    # sensor print functions
+    def collision_data(self, event):
+        print("Collision detected:\n" + str(event) + '\n')
+        self.collision_hist.append(event)
+
+    def lane_callback(lane):
+        print("Lane invasion detected:\n"+str(lane)+'\n')
+
+    def obs_callback(obs):
+        print("Obstacle detected:\n"+str(obs)+'\n')
+
+    def dist_to_waypoint(self, waypoint):
+        vehicle_transform = self.vehicle.get_transform()
+        vehicle_x = vehicle_transform.location.x
+        vehicle_y = vehicle_transform.location.y
+        waypoint_x = waypoint.transform.location.x
+        waypoint_y = waypoint.transform.location.y
+        return math.sqrt((vehicle_x - waypoint_x)**2 + (vehicle_y - waypoint_y)**2)
+    
+    def go_to_waypoint(self, waypoint, draw_waypoint = True, threshold = 0.3):
+        if draw_waypoint : 
+            self.world.debug.draw_string(waypoint.transform.location, 'O', draw_shadow=False,
+                                                       color=carla.Color(r=255, g=0, b=0), life_time=10.0,
+                                                       persistent_lines=True)
+        
+        current_pos_np = np.array([self.current_pos.x,self.current_pos.y])
+        past_pos_np = np.array([self.past_pos.x,self.past_pos.y])
+        waypoint_np = np.array([waypoint.transform.location.x,waypoint.transform.location.y])
+        vec2wp = waypoint_np - current_pos_np
+        motion_vec = current_pos_np - past_pos_np
+        dot = np.dot(vec2wp, motion_vec)
+
+        if (dot >=0):
+            while(self.dist_to_waypoint(waypoint) > threshold) :
+                control_signal = self.controller.run_step(self.vel_ref,waypoint) 
+                self.vehicle.apply_control(control_signal)
+                self.update_spectator()
+
+    def get_left_lane_waypoints(self, offset = 2*VEHICLE_VEL):
+        # TODO: Check if lane direction is the same as current direction
+        current_waypoint = self.world.get_map().get_waypoint(self.vehicle.get_location())
+        left_lane_target = current_waypoint.get_left_lane().next(offset)[0]
+        left_lane_follow = left_lane_target.next(offset)[0]
+        self.waypointsList = [left_lane_target, left_lane_follow]
+
+    def get_right_lane_waypoints(self, offset = 2*VEHICLE_VEL):
+        current_waypoint = self.world.get_map().get_waypoint(self.vehicle.get_location())
+        right_lane_target = current_waypoint.get_right_lane().next(offset)[0]
+        right_lane_follow = right_lane_target.next(offset)[0]
+        self.waypointsList = [right_lane_target, right_lane_follow]
+    
+    def get_current_lane_waypoints(self, offset = 2*VEHICLE_VEL):
+        current_waypoint = self.world.get_map().get_waypoint(self.vehicle.get_location())
+        target_wp = current_waypoint.next(offset)[0]
+        follow_wp = target_wp.next(offset)[0]
+        self.waypointsList = [target_wp, follow_wp]
+    
+    def do_left_lane_change(self):
+        self.lane_index -= 1
+        self.get_left_lane_waypoints()
+        for i in range(len(self.waypointsList)-1):
+            self.current_pos = self.vehicle.get_location()
+            self.go_to_waypoint(self.waypointsList[i])
+            self.past_pos = self.current_pos
+            self.update_spectator()
+
+    def do_right_lane_change(self):
+        self.lane_index += 1
+        self.get_right_lane_waypoints()
+        for i in range(len(self.waypointsList)-1):
+            self.current_pos = self.vehicle.get_location()
+            self.go_to_waypoint(self.waypointsList[i])
+            self.past_pos = self.current_pos
+            self.update_spectator()
+            
+    def do_follow_lane(self):
+        self.get_current_lane_waypoints()
+        ego_wp = self.world.get_map().get_waypoint(self.vehicle.get_location())
+        for i in range(len(self.waypointsList)-1):
+            # check if we need to slow down
+            # set next wp at half the distance to vehicle ahead
+            # go there
+            # return
+            self.current_pos = self.vehicle.get_location()
+            self.go_to_waypoint(self.waypointsList[i])
+            self.past_pos = self.current_pos
+            self.update_spectator()
+
+    def update_spectator(self):
+        new_yaw = math.radians(self.vehicle.get_transform().rotation.yaw)
+        spectator_transform =  self.vehicle.get_transform()
+        spectator_transform.location += carla.Location(x = -10*math.cos(new_yaw), y= -10*math.sin(new_yaw), z = 5.0)
+        
+        self.spectator.set_transform(spectator_transform)
+        self.world.tick()
+
+    def is_waypoint_in_direction_of_motion(self,waypoint):
+        current_pos = self.vehicle.get_location()
+
+    def draw_waypoints(self):
+        for waypoint in self.waypointsList:
+            self.world.debug.draw_string(waypoint.transform.location, 'O', draw_shadow=False,
+                                                       color=carla.Color(r=255, g=0, b=0), life_time=10.0,
+                                                       persistent_lines=True)
+
+    def get_state_representation(self, vehicle_list = []):
+        grid = np.ones((51, 3))
+        ego_loc = self.vehicle.get_location()
+        ego_wp = self.world.get_map().get_waypoint(self.vehicle.get_location())
+        for actor in vehicle_list:
+            actor_vel = actor.get_velocity()
+            actor_speed = (3.6 * math.sqrt(actor_vel.x ** 2 + actor_vel.y ** 2 + actor_vel.z ** 2)) / 100.0
+            actor_loc = actor.get_location()
+            dist = actor_loc.distance(ego_loc)
+            if dist > 60: continue
+            
+            cell_delta = int(dist // CELL_LEN)
+
+            previous_reference_loc = ego_wp.previous(15)[0].transform.location
+            is_behind = actor_loc.distance(previous_reference_loc) <= 15
+            if is_behind: cell_delta *= -1
+
+            # find actor's lane
+            actor_lane = None
+            left_lane_wp = None
+            center_lane_wp = None
+            right_lane_wp = None
+
+            if self.lane_index == LEFT_LANE:
+                # print("left")
+                left_lane_wp = ego_wp
+                center_lane_wp = ego_wp.get_right_lane()
+                right_lane_wp = center_lane_wp.get_right_lane()
+            elif self.lane_index == CENTER_LANE:
+                # print("center")
+                left_lane_wp = ego_wp.get_left_lane()
+                center_lane_wp = ego_wp
+                right_lane_wp = ego_wp.get_right_lane()
+            elif self.lane_index == RIGHT_LANE:
+                # print("right")
+                left_lane_wp = ego_wp.get_left_lane().get_left_lane()
+                center_lane_wp = ego_wp.get_left_lane()
+                right_lane_wp = ego_wp
+
+            left_lane_next_wp = left_lane_wp.previous(30)[0]
+            center_lane_next_wp = center_lane_wp.previous(30)[0]
+            right_lane_next_wp = right_lane_wp.previous(30)[0]
+
+            # TODO: we can speed this up by using "dist" for the range, but we need to handle next/previous search differently
+            for i in range(1, 95):
+                # print(left_lane_next_wp.transform.location.x, left_lane_next_wp.transform.location.y)
+                # print(left_lane_next_wp.transform.location)
+                # print(actor_loc.distance(left_lane_next_wp.transform.location))
+                if actor_loc.distance(left_lane_next_wp.transform.location) < 1:
+                    actor_lane = LEFT_LANE
+                    break
+                elif actor_loc.distance(center_lane_next_wp.transform.location) < 1:
+                    actor_lane = CENTER_LANE
+                    break
+                elif actor_loc.distance(right_lane_next_wp.transform.location) < 1:
+                    actor_lane = RIGHT_LANE
+                    break
+            
+                left_lane_next_wp = left_lane_next_wp.next(1)[0]
+                center_lane_next_wp = center_lane_next_wp.next(1)[0]
+                right_lane__next_wp = right_lane_next_wp.next(1)[0]
+            
+            # if we didn't find the actor's lane, it must >30m behind the ego car
+            if actor_lane == None:
+                continue
+            grid[(31 - cell_delta):(35 - cell_delta), actor_lane] = actor_speed
+            # TODO: Fill in the grid with actors' velocities
+        vel = self.vehicle.get_velocity()
+        grid[31:35, self.lane_index] = (3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)) / 100.0
+
+        state = np.zeros((45, 3))
+        state[:, :] = grid[3:48, :]
+        return state
+
+######## Training Loop ########
 if __name__ == '__main__':
-
     state_height = 45
     state_width = 3
     action_size = 3
-    EPISODES = 100
+    EPISODES = 75
     epsilon = 1
     batch_size = 16
     espisode = 1
-    # MIN_REWARD = -200
-    # EPSILON_DECAY = 0.95 ## 0.9975 99975
-    # MIN_EPSILON = 0.001
-    # AGGREGATE_STATS_EVERY = 10
+    SECONDS_PER_EPISODE = 180
+    EPSILON_DECAY = 0.95 ## 0.9975 99975
+    MIN_EPSILON = 0.001
+    action = 0
+    count = 0
 
     agent = DQNAgent(state_height, state_width, action_size)
-    env = Env()
+    player = Player()
+    state = player.reset()
 
-    # For agent speed measurements - keeps last 60 frametimes
-    fps_counter = deque(maxlen=60)
+    # print('inital state: \n', state)
+    action = agent.act(state)
+    # print('initial action: ', action)
 
-    # Loop over episodes
-    while True:
-        for i in range(80):
-            env.world.tick()
+    scores = []
+    avg_scores = []
+    locations = []
+    print('Initializing training loop: ')
+    for episode in tqdm(range(1, EPISODES + 1), unit='episodes'):
+        print('Starting a new episode!')
+        player.collision_hist = []
 
-        print('Restarting episode')
+        score = 0
+        step = 1
 
-        # Reset environment and get initial state
-        state = env.reset()
-        env.collision_hist = []
-        locations = []
+        current_state = player.reset()
+        # print('Current state: \n', current_state)
+
+        # Spawning actor vehicles around ego car
+        # radius = 500 # spawn distance radius
+        # actor_spawn_points = player.world.get_map().get_spawn_points()
+        # num_vehicles = 20 # number of vehicles to spawn around ego car
+        # player.spawn_vehicles(radius, actor_spawn_points, num_vehicles)
 
         done = False
+        episode_start = time.time()
+        player.do_follow_lane()
 
-        # Loop over steps
         while True:
-            # For FPS counter
-            step_start = time.time()
 
-            # Show current state
-            print(state)
-            state = np.reshape(state, [-1, 1, state_height, state_width])
+            current_state = np.reshape(current_state, [-1, 1, state_height, state_width])
 
-            env.update_spectator()
-            action = agent.act(state)
-            if (action == 0): # Follow current lane
-                env.do_follow_lane()
-            elif (action == 1): # Perform left lane change
-                if (env.lane_index != LEFT_LANE):
-                    env.do_left_lane_change()
-            elif (action == 2): # Perform right lane change
-                if (env.lane_index != RIGHT_LANE):
-                    env.do_right_lane_change()
-            
-            loc = env.vehicle.get_location()
+            action = agent.act(current_state)
+            # print('action taken: ', action)
+
+            new_state, reward, done, _ = player.step(action)
+
+            if action != 0:
+                agent.remember1(current_state, action, reward, new_state, done)
+            else:
+                agent.remember2(current_state, action, reward, new_state, done)
+
+            loc = player.vehicle.get_location()
             locations.append(loc)
+            score += reward
+            
+            current_state = new_state
+            # print('new state: \n', current_state)
 
-            # Step environment (additional flag informs environment to not break an episode by time limit)
-            new_state, reward, done, _ = env.step(action)
+            step += 1
 
-            # Set current step for next loop iteration
-            state = new_state
-
-            # If done - agent crashed, break an episode
             if done:
+                episode = episode + 1
+                if episode == 41:
+                    agent.epsilon_min = 0.10
+                if episode == 71:
+                    agent.epsilon_min = 0.03
+                if episode == 6:
+                    agent.epsilon_decay = 0.99985  # start epsilon decay
                 break
 
-            # Measure step time, append to a deque, then print mean FPS for last 60 frames, q values and taken action
-            frame_time = time.time() - step_start
-            fps_counter.append(frame_time)
-           
-        print('finished an episode!')
+            count += 1
+            if count == 10:
+                agent.update_target_model()
+                print('target model updated')
+                count = 0
 
-        gw = env.world.get_map().generate_waypoints(20)
+            # TODO: fix model input shapes
+            # if len(agent.memory1) > batch_size and len(agent.memory2) > batch_size:
+            #     agent.replay(batch_size)
+
+        gw = player.world.get_map().generate_waypoints(20)
+        actor_locations_x = [actor.get_location().x for actor in player.actor_list]
+        actor_locations_y = [actor.get_location().y for actor in player.actor_list]
 
         X_W = [w.transform.location.x for w in gw]
         Y_W = [w.transform.location.y for w in gw]
 
         plt.figure()
         plt.scatter(X_W, Y_W, c="black", s=1)
-        
+
         X = [loc.x for loc in locations]
         Y = [loc.y for loc in locations]
 
         plt.scatter(X, Y, c="green", s=1)
         plt.scatter(X[0], Y[0], c="red", s=2)
         plt.scatter(X[-1], Y[-1], c="blue", s=2)
+        plt.scatter(actor_locations_x, actor_locations_y, c="purple", s=10)
         plt.savefig("visualizations/" + datetime.now().strftime("%d_%m_%Y_%H_%M_%S") + ".png", dpi=300)
         plt.close()
 
-        # Destroy an actor at end of episode
-        print("Destroying actors")
-        env.client.apply_batch([carla.command.DestroyActor(x) for x in env.actor_list])
+        for actor in player.actor_list:
+            actor.destroy()
 
-    # FPS = 15
-    # ep_rewards = [-200]
+        scores.append(score)
+        avg_scores.append(np.mean(scores[-10:]))
 
-    # # For more repetitive results
-    # random.seed(1)
-    # np.random.seed(1)
-    # tf.compat.v1.set_random_seed(1)
-    
-    # # Create models folder
-    # if not os.path.isdir('models_trained'):
-    #     os.makedirs('models_trained')
+        print('episode: ', episode, 'score %.2f' % score)
 
-    # state_height = 45
-    # state_width = 3
-    # action_size = 3
-    # EPISODES = 100
-    # epsilon = 1
-    # batch_size = 16
-    # espisode = 1
-    # # MIN_REWARD = -200
-    # # EPSILON_DECAY = 0.95 ## 0.9975 99975
-    # # MIN_EPSILON = 0.001
-    # # AGGREGATE_STATS_EVERY = 10
+        # Decay epsilon
+        if epsilon > MIN_EPSILON:
+            epsilon *= EPSILON_DECAY
+            epsilon = max(MIN_EPSILON, epsilon)
 
-    # agent = DQNAgent(state_height, state_width, action_size)
-    # env = Env()
-
-    # while episode <= EPISODES:
-    #     env.update_spectator()
-    #     state = env.reset()
-    #     action = 0
-    #     count = 0
-        
-    #     last_act = action
-    #     if env.collision_hist[-1] == True:
-    #         last_reward = -30
-        
-    #     if 
-
-    #     model_output = agent.act(state)
-    #     if (model_output == 0): # Follow current lane
-    #         env.do_follow_lane()
-    #     elif (model_output == 1): # Perform left lane change
-    #         if (env.lane_index != env.LEFT_LANE):
-    #             env.do_left_lane_change()
-    #     elif (model_output == 2): # Perform right lane change
-    #         if (env.lane_index != env.RIGHT_LANE):
-    #             env.do_right_lane_change()
-
-    #     print(env.state)
-    #     loc = env.vehicle.get_location()
-    #     locations.append(loc)
-    #     print(loc)
-        
-    #     done = False
-    #     if done == True:
-    #         agent.save("./models_trained/episode" + str(episode) + ".h5")
-    #         print("weights saved")
-    #         print("episode: {}, epsilon: {}".format(episode, agent.epsilon))
-    #         with open("./models_trained/train.txt", "a") as f:
-    #             f.write(" episode {} epsilon {}\n".format(episode, agent.epsilon))
-    #         with open('./models_trained/trainexp1.pkl', 'wb') as exp1:
-    #             pickle.dump(agent.memory1, exp1)
-    #         with open('./models_trained/exp2.pkl', 'wb') as exp2:
-    #             pickle.dump(agent.memory2, exp2)
-    #         episode = episode + 1
-    #         if episode == 41:
-    #             agent.epsilon_min = 0.10
-    #         if episode == 71:
-    #             agent.epsilon_min = 0.03
-    #         if episode == 6:
-    #             agent.epsilon_decay = 0.99985  # start epsilon decay
-    #         break
-
-        
-
-        
-
-
-
-#NOTE: SENTDEX'S IMPLEMENTATION:
-    # # Iterate over episodes
-    # scores = []
-    # avg_scores = []
-    # for episode in tqdm(range(1, EPISODES + 1), ascii=True, unit='episodes'):
-
-    #     env.collision_hist = []
-
-    #     # Restarting episode - reset episode reward and step number
-    #     score = 0
-    #     step = 1
-
-    #     # Reset environment and get initial state
-    #     current_state = env.reset()
-
-    #     # Reset flag and start iterating until episode ends
-    #     done = False
-    #     episode_start = time.time()
-
-    #     # Play for given number of seconds only
-    #     while True:
-
-    #         # This part stays mostly the same, the change is to query a model for Q values
-    #         if np.random.random() > epsilon:
-    #             # Get action from Q table
-    #             action = np.argmax(agent.act(current_state))
-    #         else:
-    #             # Get random action
-    #             action = np.random.randint(0, 3)
-    #             # This takes no time, so we add a delay matching 60 FPS (prediction above takes longer)
-    #             time.sleep(1/FPS)
-
-    #         new_state, reward, done, _ = env.step(action)
-
-    #         # Transform new continous state to new discrete state and count reward
-    #         score += reward
-
-    #         # Every step we update replay memory
-    #         agent.remember1((current_state, action, reward, new_state, done))
-
-    #         current_state = new_state
-    #         step += 1
-
-    #         model_output = agent.act(current_state)
-    #         if (model_output == 0): # Follow current lane
-    #             env.do_follow_lane()
-    #         elif (model_output == 1): # Perform left lane change
-    #             if (env.lane_index != LEFT_LANE):
-    #                 env.do_left_lane_change()
-    #         elif (model_output == 2): # Perform right lane change
-    #             if (env.lane_index != RIGHT_LANE):
-    #                 env.do_right_lane_change()
-
-    #         print(current_state)
-    #         loc = env.vehicle.get_location()
-    #         locations.append(loc)
-    #         print(loc)
-
-    #         if done:
-    #             break
-                
-    #     gw = world.get_map().generate_waypoints(20)
-
-    #     X_W = [w.transform.location.x for w in gw]
-    #     Y_W = [w.transform.location.y for w in gw]
-
-    #     plt.figure()
-    #     plt.scatter(X_W, Y_W, c="black", s=1)
-
-    #     X = [loc.x for loc in locations]
-    #     Y = [loc.y for loc in locations]
-
-    #     plt.scatter(X, Y, c="green", s=1)
-    #     plt.scatter(X[0], Y[0], c="red", s=2)
-    #     plt.scatter(X[-1], Y[-1], c="blue", s=2)
-    #     plt.savefig("visualizations/" + datetime.now().strftime("%d_%m_%Y_%H_%M_%S") + ".png", dpi=300)
-    #     plt.close()
-
-    #     # End of episode - destroy agents
-    #     for actor in env.actor_list:
-    #         actor.destroy()
-
-    #     scores.append(score)
-    #     avg_scores.append(np.mean(scores[-10:]))
-
-    #     if not episode % AGGREGATE_STATS_EVERY or episode == 1:
-    #         avg_scores.append(np.mean(scores[-AGGREGATE_STATS_EVERY:]))
-    #         min_reward = min(ep_rewards[-AGGREGATE_STATS_EVERY:])
-    #         max_reward = max(ep_rewards[-AGGREGATE_STATS_EVERY:])
-    #         agent.tensorboard.update_stats(reward_avg=average_reward, reward_min=min_reward, reward_max=max_reward, epsilon=epsilon)
-
-
-    #             #Save model, but only when min reward is greater or equal a set value
-    #         if min_reward >= MIN_REWARD:
-    #             agent.model.save(f'models_trained/{MODEL_NAME}__{max_reward:_>7.2f}max_{avg_score:_>7.2f}avg_{min_reward:_>7.2f}min__{int(time.time())}.model')
-
-    #         print('episode: ', episode, 'score %.2f' % score)
-    #         # Decay epsilon
-    #         if epsilon > MIN_EPSILON:
-    #             epsilon *= EPSILON_DECAY
-    #             epsilon = max(MIN_EPSILON, epsilon)
-
-    # # Set termination flag for training thread and wait for it to finish
-    # agent.terminate = True
-    # # trainer_thread.join()
-    # agent.model.save(f'models_trained/{MODEL_NAME}__{max_reward:_>7.2f}max_{avg_score:_>7.2f}avg_{min_reward:_>7.2f}min__{int(time.time())}.model')
-
-    # fig = plt.figure()
-    # ax = fig.add_subplot(111)
-    # plt.plot(scores)
-    # plt.plot(avg_scores)
-    # plt.ylabel('Score')
-    # plt.xlabel('Episode #')
-    # plt.show()
+    print('Scores List: ', scores)
+    print('Avg. Scores List: ', avg_scores)
