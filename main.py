@@ -4,10 +4,10 @@ import os
 import time
 import random
 import math
+import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
-
 from agents.navigation.controller import VehiclePIDController
 
 from models.DQN import *
@@ -23,7 +23,7 @@ except IndexError:
 
 import carla
 
-VEHICLE_VEL = 25
+VEHICLE_VEL = 15
 LEFT_LANE = 0
 CENTER_LANE = 1
 RIGHT_LANE = 2
@@ -53,7 +53,9 @@ class Player():
         self.past_pos = self.vehicle.get_transform().location
         self.vehicle_list = []
         self.actor_list = []
-
+        self.collision_hist = []
+        self.steps_since_last_vehicle_spawn = 0
+        self.pos = None
 
         self.tm_port = 9500
         tm_is_initialized = False
@@ -93,12 +95,13 @@ class Player():
         self.vehicle_list.append(self.vehicle)
         self.actor_list.append(self.vehicle)
         self.actor_list.append(self.spectator)
+        self.steps_since_last_vehicle_spawn = 0
 
         # collision sensor
         col_sensor = self.blp_lib.find('sensor.other.collision')
         col_transform = carla.Transform(carla.Location(0,0,0), carla.Rotation(0,0,0))
         self.ego_col = self.world.spawn_actor(col_sensor, col_transform, attach_to=self.vehicle, attachment_type=carla.AttachmentType.Rigid)
-        self.ego_col.listen(lambda event: collision_data(event))
+        self.ego_col.listen(lambda event: self.collision_data(event))
 
         # lane invasion sensor
         # lane_bp = self.blp_lib.find('sensor.other.lane_invasion')
@@ -107,11 +110,11 @@ class Player():
         # self.ego_lane.listen(lambda lane: lane_callback(lane))
 
         # obstacle sensor
-        obs_bp = self.blp_lib.find('sensor.other.obstacle')
-        obs_bp.set_attribute("only_dynamics", str(True))
-        obs_transform = carla.Transform(carla.Location(0,0,0), carla.Rotation(0,0,0))
-        self.ego_obs = self.world.spawn_actor(obs_bp, obs_transform, attach_to=self.vehicle, attachment_type=carla.AttachmentType.Rigid)
-        self.ego_obs.listen(lambda obs: obs_callback(obs))
+        # obs_bp = self.blp_lib.find('sensor.other.obstacle')
+        # obs_bp.set_attribute("only_dynamics", str(True))
+        # obs_transform = carla.Transform(carla.Location(0,0,0), carla.Rotation(0,0,0))
+        # self.ego_obs = self.world.spawn_actor(obs_bp, obs_transform, attach_to=self.vehicle, attachment_type=carla.AttachmentType.Rigid)
+        # self.ego_obs.listen(lambda obs: obs_callback(obs))
 
         # while self.state is None:
         #     time.sleep(0.01)
@@ -198,8 +201,22 @@ class Player():
         max_throt = 0.75
         max_brake = 0.3
         max_steer = 0.8
+        v = self.vehicle.get_velocity()
+        kmh = int(3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2))
         reward = 0
         
+        if len(self.collision_hist) != 0:
+            print("step func detected collision")
+            done = True
+            reward -= 10
+            return self.state, self.pos, reward, done, None
+        elif kmh < 50:
+            done = False
+            reward -= 1
+        else:
+            done = False
+            reward += 1
+
         self.controller = VehiclePIDController(self.vehicle,
                                         args_lateral=args_lateral_dict,
                                         args_longitudinal=args_longitudinal_dict,
@@ -223,72 +240,70 @@ class Player():
                 self.do_follow_lane()
                 reward -= 5
 
-        v = self.vehicle.get_velocity()
-        kmh = int(3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2))
-
-        if len(self.collision_hist) != 0:
-            done = True
-            reward -= 10
-        elif kmh < 50:
-            done = False
-            reward -= 1
-        else:
-            done = False
-            reward += 1
+        if self.steps_since_last_vehicle_spawn >= 2:
+            self.spawn_vehicle()
+            self.steps_since_last_vehicle_spawn = 0
+        self.steps_since_last_vehicle_spawn += 1
+        self.state = self.get_state_representation(self.vehicle_list)
 
         if self.episode_start + SECONDS_PER_EPISODE < time.time():
             done = True
 
-        self.state = self.get_state_representation(self.vehicle_list)
+        ego_speed = player.vehicle.get_velocity()
+        ego_lane = player.lane_index
 
-        return self.state, reward, done, None
+        self.pos = [ego_speed / 25, 0, 0]
+        if ego_lane == LEFT_LANE:
+            self.pos = [ego_speed / 25, 1, 0]
+        elif ego_lane == CENTER_LANE:
+            self.pos = [ego_speed / 25, 1, 1]
+        elif ego_lane == RIGHT_LANE:
+            self.pos = [ego_speed / 25, 0, 1]
+        self.pos = np.reshape(self.pos, [1, 3])
 
-    def spawn_vehicles(self, radius, actor_spawn_points, num_vehicles):
-        np.random.shuffle(actor_spawn_points)  # shuffle all spawn points
-        ego_location = self.vehicle.get_location()
-        accessible_points = []
-        for spawn_point in actor_spawn_points:
-            dis = math.sqrt((ego_location.x-spawn_point.location.x)**2 + (ego_location.y-spawn_point.location.y)**2)
-            # it also can include z-coordinate,but it is unnecessary
-            if dis < radius:
-                # print(dis)
-                accessible_points.append(spawn_point)
+        return self.state, self.pos, reward, done, None
 
-        # vehicle_bps = self.world.get_blueprint_library().filter('Leon')   # TODO: Might want to use the Leon
-        # vehicle_bps = [x for x in vehicle_bps if int(x.get_attribute('number_of_wheels')) == 4]  # only choose car with 4 wheels
+    def spawn_vehicle(self):
+        ego_loc = self.vehicle.get_location()
+        ego_wp = self.world.get_map().get_waypoint(ego_loc)
+        spawn_lane = random.choice([LEFT_LANE, CENTER_LANE, RIGHT_LANE])
+        if self.lane_index == LEFT_LANE:
+            center_lane_wp = ego_wp.get_right_lane()
+        elif self.lane_index == CENTER_LANE:
+            center_lane_wp = ego_wp
+        elif self.lane_index == RIGHT_LANE:
+            center_lane_wp = ego_wp.get_left_lane()
 
-        if len(accessible_points) < num_vehicles:
-            # if your radius is relatively small,the satisfied points may be insufficient
-            num_vehicles = len(accessible_points)
+        if spawn_lane == LEFT_LANE:
+            spawn_wp = center_lane_wp.get_left_lane().next(70)[0]
+        elif spawn_lane == CENTER_LANE:
+            spawn_wp = center_lane_wp.next(70)[0]
+        elif spawn_lane == RIGHT_LANE:
+            spawn_wp = center_lane_wp.get_right_lane().next(70)[0]
 
-        for i in range(num_vehicles):  # generate the free vehicle
-            point = accessible_points[i]
-            # print(point)
-            _loc = point.location
-            point.location = carla.Location(_loc.x, _loc.y, _loc.z + 1)
-            # print(point)
-            # actors_bp = np.random.choice(vehicle_bps)
-            actors_bp = self.model_3
-            try:
-                actor_vehicle = self.world.spawn_actor(actors_bp, point)
-                print("spawned actor")
-                self.vehicle_list.append(actor_vehicle)
-                self.actor_list.append(actor_vehicle)
-                
-            except:
-                print('failed appending new vehicle actor!')  # if failed, print the hints.
-                pass
-
-        for v in self.vehicle_list:  # set every vehicle's mode
-            v.set_autopilot(True, self.tm_port)  # you can get those functions detail in carla document
-            self.tm.ignore_lights_percentage(v, 0)
-            self.tm.distance_to_leading_vehicle(v, 0.5)
-            self.tm.vehicle_percentage_speed_difference(v, -20)
+        # print(spawn_wp.transform)
+        spawn_transform = spawn_wp.transform
+        _loc = spawn_transform.location
+        spawn_transform.location = carla.Location(_loc.x, _loc.y, _loc.z + 0.5)
+        # print(spawn_transform)
+        try:
+            actor_vehicle = self.world.spawn_actor(self.model_3, spawn_transform)
+            print("spawned actor")
+            self.vehicle_list.append(actor_vehicle)
+            self.actor_list.append(actor_vehicle)
+            # actor_vehicle.set_autopilot(True, self.tm_port)  # you can get those functions detail in carla document
+            # self.tm.ignore_lights_percentage(actor_vehicle, 0)
+            # self.tm.distance_to_leading_vehicle(actor_vehicle, 0.5)
+            # self.tm.vehicle_percentage_speed_difference(actor_vehicle, -20)
+        except:
+            print('failed appending new vehicle actor!')  # if failed, print the hints.
+            pass
 
     # sensor print functions
     def collision_data(self, event):
         print("Collision detected:\n" + str(event) + '\n')
         self.collision_hist.append(event)
+        self.ego_col.stop()
 
     def lane_callback(lane):
         print("Lane invasion detected:\n"+str(lane)+'\n')
@@ -321,6 +336,8 @@ class Player():
             while(self.dist_to_waypoint(waypoint) > threshold) :
                 control_signal = self.controller.run_step(self.vel_ref,waypoint) 
                 self.vehicle.apply_control(control_signal)
+                if len(self.collision_hist) != 0:
+                    return
                 self.update_spectator()
 
     def get_left_lane_waypoints(self, offset = 2*VEHICLE_VEL):
@@ -469,29 +486,38 @@ if __name__ == '__main__':
     state_height = 45
     state_width = 3
     action_size = 3
-    EPISODES = 75
+    EPISODES = 25 # 
     epsilon = 1
-    batch_size = 16
+    batch_size = 4
     espisode = 1
-    SECONDS_PER_EPISODE = 180
+    SECONDS_PER_EPISODE = 10 * 60
     EPSILON_DECAY = 0.95 ## 0.9975 99975
     MIN_EPSILON = 0.001
-    action = 0
     count = 0
-
+    
     agent = DQNAgent(state_height, state_width, action_size)
     player = Player()
-    state = player.reset()
 
-    # print('inital state: \n', state)
-    action = agent.act(state)
-    # print('initial action: ', action)
+    ego_speed = player.vehicle.get_velocity()
+    ego_lane = player.lane_index
+
+    pos = [ego_speed / 25, 0, 0]
+    if ego_lane == LEFT_LANE:
+        pos = [ego_speed / 25, 1, 0]
+    elif ego_lane == CENTER_LANE:
+        pos = [ego_speed / 25, 1, 1]
+    elif ego_lane == RIGHT_LANE:
+        pos = [ego_speed / 25, 0, 1]
+    pos = np.reshape(pos, [1, 3])
+
+    action = 0
 
     scores = []
     avg_scores = []
     locations = []
     print('Initializing training loop: ')
     for episode in tqdm(range(1, EPISODES + 1), unit='episodes'):
+        locations = []
         print('Starting a new episode!')
         player.collision_hist = []
 
@@ -499,30 +525,35 @@ if __name__ == '__main__':
         step = 1
 
         current_state = player.reset()
-        # print('Current state: \n', current_state)
-
-        # Spawning actor vehicles around ego car
-        # radius = 500 # spawn distance radius
-        # actor_spawn_points = player.world.get_map().get_spawn_points()
-        # num_vehicles = 20 # number of vehicles to spawn around ego car
-        # player.spawn_vehicles(radius, actor_spawn_points, num_vehicles)
-
+        print('Current state: \n', current_state)
+        
         done = False
         episode_start = time.time()
         player.do_follow_lane()
+        ego_speed = player.vehicle.get_velocity()
+        ego_lane = player.lane_index
 
+        pos = [ego_speed / 25, 0, 0]
+        if ego_lane == LEFT_LANE:
+            pos = [ego_speed / 25, 1, 0]
+        elif ego_lane == CENTER_LANE:
+            pos = [ego_speed / 25, 1, 1]
+        elif ego_lane == RIGHT_LANE:
+            pos = [ego_speed / 25, 0, 1]
+        pos = np.reshape(pos, [1, 3])
+        current_pos = pos
         while True:
-
             current_state = np.reshape(current_state, [-1, 1, state_height, state_width])
+            action = agent.act([current_state, current_pos])
+            print('action taken: ', action)
 
-            action = agent.act(current_state)
-            # print('action taken: ', action)
-
-            new_state, reward, done, _ = player.step(action)
+            new_state, new_pos, reward, done, _ = player.step(action)
 
             if action != 0:
+                print(current_state)
                 agent.remember1(current_state, action, reward, new_state, done)
             else:
+                print(current_state)
                 agent.remember2(current_state, action, reward, new_state, done)
 
             loc = player.vehicle.get_location()
@@ -530,11 +561,21 @@ if __name__ == '__main__':
             score += reward
             
             current_state = new_state
-            # print('new state: \n', current_state)
-
+            print('new state: \n', current_state)
+            current_pos = new_pos
             step += 1
 
             if done:
+                agent.save("models/" + str(episode) + ".h5")
+                print("weight saved")
+                print("episode: {}, epsilon: {}".format(episode, agent.epsilon))
+                with open('models/train.txt', 'a') as f:
+                    f.write(" episode {} epsilon {}\n".format(episode, agent.epsilon))
+                with open('models/trainexp1.pkl', 'wb') as exp1:
+                    pickle.dump(agent.memory1, exp1)
+                with open('models/exp2.pkl', 'wb') as exp2:
+                    pickle.dump(agent.memory2, exp2)
+
                 episode = episode + 1
                 if episode == 41:
                     agent.epsilon_min = 0.10
@@ -550,10 +591,9 @@ if __name__ == '__main__':
                 print('target model updated')
                 count = 0
 
-            # TODO: fix model input shapes
             # if len(agent.memory1) > batch_size and len(agent.memory2) > batch_size:
             #     agent.replay(batch_size)
-
+            
         gw = player.world.get_map().generate_waypoints(20)
         actor_locations_x = [actor.get_location().x for actor in player.actor_list]
         actor_locations_y = [actor.get_location().y for actor in player.actor_list]
@@ -562,16 +602,16 @@ if __name__ == '__main__':
         Y_W = [w.transform.location.y for w in gw]
 
         plt.figure()
-        plt.scatter(X_W, Y_W, c="black", s=1)
+        plt.scatter(X_W, Y_W, c="black", s=0.5)
 
         X = [loc.x for loc in locations]
         Y = [loc.y for loc in locations]
 
-        plt.scatter(X, Y, c="green", s=1)
-        plt.scatter(X[0], Y[0], c="red", s=2)
-        plt.scatter(X[-1], Y[-1], c="blue", s=2)
-        plt.scatter(actor_locations_x, actor_locations_y, c="purple", s=10)
-        plt.savefig("visualizations/" + datetime.now().strftime("%d_%m_%Y_%H_%M_%S") + ".png", dpi=300)
+        plt.plot(X, Y, c="green", linewidth=0.5)
+        plt.scatter(X[0], Y[0], c="red", s=1)
+        plt.scatter(X[-1], Y[-1], c="blue", s=1)
+        plt.scatter(actor_locations_x, actor_locations_y, c="purple", s=1)
+        plt.savefig("visualizations/" + datetime.now().strftime("%d_%m_%Y_%H_%M_%S") + ".png", dpi=300, transparent=True)
         plt.close()
 
         for actor in player.actor_list:

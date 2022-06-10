@@ -13,9 +13,10 @@ from tensorflow.keras.optimizers import Adam
 from keras.callbacks import TensorBoard
 from tqdm import tqdm
 # import keras.backend.tensorflow_backend as backend
-from threading import Thread
-import tensorflow as tf
+# from threading import Thread
+# import tensorflow as tf
 import tensorflow.compat.v1 as tf
+# tf.compat.v1.disable_v2_behavior()
 # from keras.backend.tensorflow_backend import set_session
 # config = tf.ConfigProto()
 # config.gpu_options.per_process_gpu_memory_fraction = 0.3
@@ -23,7 +24,7 @@ import tensorflow.compat.v1 as tf
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
 # from carla_env.new_env import *
-# tf.disable_v2_behavior()
+tf.disable_v2_behavior()
 
 class DQNAgent:
 
@@ -59,8 +60,7 @@ class DQNAgent:
         state2 = Dense(64, activation='relu')(state2)
         out_put = Dense(self.action_size, activation='linear')(state2)
         model = Model(inputs=[input1, input2], outputs=out_put)
-        model.compile(loss='mse',
-                      optimizer=Adam(lr=self.learning_rate))
+        model.compile(loss='mse', optimizer=Adam(learning_rate=self.learning_rate))
         return model
 
     def update_target_model(self):
@@ -93,17 +93,21 @@ class DQNAgent:
         minibatch = minibatch1 + minibatch2
 
         for state, action, reward, next_state, done in minibatch:
-            if not done:
-                target = self.model.predict(state)
-                t = self.target_model.predict(next_state)[0]
-                target[0][action] = reward + self.gamma * np.amax(t)
-                self.model.fit(state, target, epochs=1, verbose=0)
-            else:
-                target[0][action] = reward
+            # if not done:
+            print(state.shape)
+            # pos = [0, 0, 0]
+            # pos = np.reshape(pos, [1, 3])
+            # target = self.model.predict((state, pos))
+            target = self.model.predict(state)
+            t = self.target_model.predict(next_state)[0]
+            target[0][action] = reward + self.gamma * np.amax(t)
+            self.model.fit(state, target, epochs=1, verbose=0)
+            # else:
+            #     target = self.model.predict(state)
+            #     target[0][action] = reward
 
         if self.epsilon > self.epsilon_min:
-            self.epsilon = max(
-                self.epsilon*self.epsilon_decay, self.epsilon_min)
+            self.epsilon = max(self.epsilon*self.epsilon_decay, self.epsilon_min)
 
     def load(self, name):
         self.model.load_weights(name)
