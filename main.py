@@ -23,7 +23,7 @@ except IndexError:
 
 import carla
 
-VEHICLE_VEL = 15
+VEHICLE_VEL = 38
 LEFT_LANE = 0
 CENTER_LANE = 1
 RIGHT_LANE = 2
@@ -37,13 +37,13 @@ class Player():
     def __init__(self):
         self.client = carla.Client("localhost", 1555)
         self.client.set_timeout(10.0)
-        self.world = self.client.load_world("Town04")
+        self.world = self.client.load_world("Town05")
         self.blp_lib = self.world.get_blueprint_library()
         self.model_3 = self.blp_lib.filter("model3")[0]
         # # Spawning ego car
         self.spectator = self.world.get_spectator()
-        self.initial_transform = carla.Transform(carla.Location(x=8.758563, y=68.032547, z=0.281942),
-                                         carla.Rotation(pitch=0.000000, yaw=-90.289116, roll=0.000000))
+        self.initial_transform = carla.Transform(carla.Location(x=100.3564453125, y=-204.0, z=0.5),
+                                         carla.Rotation(pitch=0.000000, yaw=179.757080078125, roll=0.000000))
 
         self.vehicle = self.world.try_spawn_actor(self.model_3, self.initial_transform)
 
@@ -63,6 +63,7 @@ class Player():
             try:
                 self.tm = self.client.get_trafficmanager(self.tm_port)
                 self.tm.global_percentage_speed_difference(10.0)  # set the global speed limitation
+                self.tm.set_synchronous_mode(True)
                 tm_is_initialized = True
             except Exception as err:
                 print("Caught exception during traffic manager creation: ")
@@ -78,21 +79,25 @@ class Player():
         self.lane_index = CENTER_LANE
         self.vel_ref = VEHICLE_VEL
         self.waypointsList = []
-        # self.current_pos = self.vehicle.get_transform().location
-        # self.past_pos = self.vehicle.get_transform().location
         
         self.settings = self.world.get_settings()
         self.settings.synchronous_mode = True
         self.settings.fixed_delta_seconds = 1/20
         self.world.apply_settings(self.settings)
 
-        self.world = self.client.load_world("Town04")
+        self.world = self.client.load_world("Town05")
         self.world.tick()
         
         self.spectator = self.world.get_spectator()
-        self.vehicle = self.world.try_spawn_actor(self.model_3, self.initial_transform)
+        self.vehicle = None
+        while self.vehicle is None:
+            self.vehicle = self.world.try_spawn_actor(self.model_3, self.initial_transform)
+        self.world.tick()
 
-        self.vehicle_list.append(self.vehicle)
+        # self.current_pos = self.vehicle.get_transform().location
+        # self.past_pos = self.vehicle.get_transform().location
+
+        # self.vehicle_list.append(self.vehicle)
         self.actor_list.append(self.vehicle)
         self.actor_list.append(self.spectator)
         self.steps_since_last_vehicle_spawn = 0
@@ -161,6 +166,7 @@ class Player():
             center_lane_next_wp = center_lane_wp.previous(30)[0]
             right_lane_next_wp = right_lane_wp.previous(30)[0]
 
+
             # TODO: we can speed this up by using "dist" for the range, but we need to handle next/previous search differently
             for i in range(1, 95):
                 # print(left_lane_next_wp.transform.location.x, left_lane_next_wp.transform.location.y)
@@ -179,7 +185,7 @@ class Player():
                 left_lane_next_wp = left_lane_next_wp.next(1)[0]
                 center_lane_next_wp = center_lane_next_wp.next(1)[0]
                 right_lane__next_wp = right_lane_next_wp.next(1)[0]
-            
+                
             # if we didn't find the actor's lane, it must >30m behind the ego car
             if actor_lane == None:
                 continue
@@ -190,6 +196,20 @@ class Player():
 
         self.state = np.zeros((45, 3))
         self.state[:, :] = grid[3:48, :]
+
+        self.tm_port = 9500
+        tm_is_initialized = False
+        while not tm_is_initialized:
+            try:
+                self.tm = self.client.get_trafficmanager(self.tm_port)
+                self.tm.global_percentage_speed_difference(10.0)  # set the global speed limitation
+                self.tm.set_synchronous_mode(True)
+                tm_is_initialized = True
+            except Exception as err:
+                print("Caught exception during traffic manager creation: ")
+                print(err)
+                self.tm_port += 1
+                print("Trying with port {}...".format(self.tm_port))
 
         return self.state
 
@@ -244,7 +264,13 @@ class Player():
             self.spawn_vehicle()
             self.steps_since_last_vehicle_spawn = 0
         self.steps_since_last_vehicle_spawn += 1
-        self.state = self.get_state_representation(self.vehicle_list)
+        new_state = self.get_state_representation(self.vehicle_list)
+
+        if new_state is None:
+            done = True
+            return self.state, self.pos, reward, done, None
+        else:
+            self.state = new_state
 
         if self.episode_start + SECONDS_PER_EPISODE < time.time():
             done = True
@@ -274,24 +300,22 @@ class Player():
         elif self.lane_index == RIGHT_LANE:
             center_lane_wp = ego_wp.get_left_lane()
 
-        if spawn_lane == LEFT_LANE:
-            spawn_wp = center_lane_wp.get_left_lane().next(70)[0]
-        elif spawn_lane == CENTER_LANE:
-            spawn_wp = center_lane_wp.next(70)[0]
-        elif spawn_lane == RIGHT_LANE:
-            spawn_wp = center_lane_wp.get_right_lane().next(70)[0]
-
-        # print(spawn_wp.transform)
-        spawn_transform = spawn_wp.transform
-        _loc = spawn_transform.location
-        spawn_transform.location = carla.Location(_loc.x, _loc.y, _loc.z + 0.5)
-        # print(spawn_transform)
         try:
+            if spawn_lane == LEFT_LANE:
+                spawn_wp = center_lane_wp.get_left_lane().next(70)[0]
+            elif spawn_lane == CENTER_LANE:
+                spawn_wp = center_lane_wp.next(70)[0]
+            elif spawn_lane == RIGHT_LANE:
+                spawn_wp = center_lane_wp.get_right_lane().next(70)[0]
+
+            spawn_transform = spawn_wp.transform
+            _loc = spawn_transform.location
+            spawn_transform.location = carla.Location(_loc.x, _loc.y, _loc.z + 0.5)
             actor_vehicle = self.world.spawn_actor(self.model_3, spawn_transform)
             print("spawned actor")
             self.vehicle_list.append(actor_vehicle)
             self.actor_list.append(actor_vehicle)
-            # actor_vehicle.set_autopilot(True, self.tm_port)  # you can get those functions detail in carla document
+            actor_vehicle.set_autopilot(True, self.tm_port)  # you can get those functions detail in carla document
             # self.tm.ignore_lights_percentage(actor_vehicle, 0)
             # self.tm.distance_to_leading_vehicle(actor_vehicle, 0.5)
             # self.tm.vehicle_percentage_speed_difference(actor_vehicle, -20)
@@ -381,6 +405,9 @@ class Player():
         self.get_current_lane_waypoints()
         ego_wp = self.world.get_map().get_waypoint(self.vehicle.get_location())
         for i in range(len(self.waypointsList)-1):
+            # dist = dist_to_waypoint(self.waypointsList[i])
+            # check_wp = 
+            # for j in range(2, dist):
             # check if we need to slow down
             # set next wp at half the distance to vehicle ahead
             # go there
@@ -446,6 +473,9 @@ class Player():
                 center_lane_wp = ego_wp.get_left_lane()
                 right_lane_wp = ego_wp
 
+            if left_lane_wp is None or center_lane_wp is None or right_lane_wp is None:
+                return None
+
             left_lane_next_wp = left_lane_wp.previous(30)[0]
             center_lane_next_wp = center_lane_wp.previous(30)[0]
             right_lane_next_wp = right_lane_wp.previous(30)[0]
@@ -467,7 +497,7 @@ class Player():
             
                 left_lane_next_wp = left_lane_next_wp.next(1)[0]
                 center_lane_next_wp = center_lane_next_wp.next(1)[0]
-                right_lane__next_wp = right_lane_next_wp.next(1)[0]
+                right_lane_next_wp = right_lane_next_wp.next(1)[0]
             
             # if we didn't find the actor's lane, it must >30m behind the ego car
             if actor_lane == None:
@@ -486,13 +516,9 @@ if __name__ == '__main__':
     state_height = 45
     state_width = 3
     action_size = 3
-    EPISODES = 25 # 
-    epsilon = 1
-    batch_size = 4
-    espisode = 1
-    SECONDS_PER_EPISODE = 10 * 60
-    EPSILON_DECAY = 0.95 ## 0.9975 99975
-    MIN_EPSILON = 0.001
+    EPISODES = 100
+    batch_size = 16
+    SECONDS_PER_EPISODE = 6 * 60
     count = 0
     
     agent = DQNAgent(state_height, state_width, action_size)
@@ -529,7 +555,7 @@ if __name__ == '__main__':
         
         done = False
         episode_start = time.time()
-        player.do_follow_lane()
+        # player.do_follow_lane()
         ego_speed = player.vehicle.get_velocity()
         ego_lane = player.lane_index
 
@@ -542,57 +568,59 @@ if __name__ == '__main__':
             pos = [ego_speed / 25, 0, 1]
         pos = np.reshape(pos, [1, 3])
         current_pos = pos
-        while True:
-            current_state = np.reshape(current_state, [-1, 1, state_height, state_width])
-            action = agent.act([current_state, current_pos])
-            print('action taken: ', action)
+        try:
+            while True:
+                current_state = np.reshape(current_state, [-1, 1, state_height, state_width])
+                current_state = np.array(current_state)
+                action = agent.act([current_state, current_pos])
+                print('action taken: ', action)
 
-            new_state, new_pos, reward, done, _ = player.step(action)
+                new_state, new_pos, reward, done, _ = player.step(action)
 
-            if action != 0:
-                print(current_state)
-                agent.remember1(current_state, action, reward, new_state, done)
-            else:
-                print(current_state)
-                agent.remember2(current_state, action, reward, new_state, done)
+                if action != 0:
+                    agent.remember1(current_state, action, reward, new_state, done)
+                else:
+                    agent.remember2(current_state, action, reward, new_state, done)
 
-            loc = player.vehicle.get_location()
-            locations.append(loc)
-            score += reward
-            
-            current_state = new_state
-            print('new state: \n', current_state)
-            current_pos = new_pos
-            step += 1
+                loc = player.vehicle.get_location()
+                locations.append(loc)
+                score += reward
+                
+                current_state = new_state
+                print('new state: \n', current_state)
+                current_pos = new_pos
+                step += 1
 
-            if done:
-                agent.save("models/" + str(episode) + ".h5")
-                print("weight saved")
-                print("episode: {}, epsilon: {}".format(episode, agent.epsilon))
-                with open('models/train.txt', 'a') as f:
-                    f.write(" episode {} epsilon {}\n".format(episode, agent.epsilon))
-                with open('models/trainexp1.pkl', 'wb') as exp1:
-                    pickle.dump(agent.memory1, exp1)
-                with open('models/exp2.pkl', 'wb') as exp2:
-                    pickle.dump(agent.memory2, exp2)
+                if done:
+                    agent.save("models/" + str(episode) + ".h5")
+                    print("weight saved")
+                    print("episode: {}, epsilon: {}".format(episode, agent.epsilon))
+                    with open('models/train.txt', 'a') as f:
+                        f.write(" episode {} epsilon {}\n".format(episode, agent.epsilon))
+                    with open('models/trainexp1.pkl', 'wb') as exp1:
+                        pickle.dump(agent.memory1, exp1)
+                    with open('models/exp2.pkl', 'wb') as exp2:
+                        pickle.dump(agent.memory2, exp2)
 
-                episode = episode + 1
-                if episode == 41:
-                    agent.epsilon_min = 0.10
-                if episode == 71:
-                    agent.epsilon_min = 0.03
-                if episode == 6:
-                    agent.epsilon_decay = 0.99985  # start epsilon decay
-                break
+                    episode = episode + 1
+                    if episode == 41:
+                        agent.epsilon_min = 0.10
+                    if episode == 71:
+                        agent.epsilon_min = 0.03
+                    if episode == 6:
+                        agent.epsilon_decay = 0.99985  # start epsilon decay
+                    break
 
-            count += 1
-            if count == 10:
-                agent.update_target_model()
-                print('target model updated')
-                count = 0
+                count += 1
+                if count == 10:
+                    agent.update_target_model()
+                    print('target model updated')
+                    count = 0
 
-            # if len(agent.memory1) > batch_size and len(agent.memory2) > batch_size:
-            #     agent.replay(batch_size)
+                if len(agent.memory1) > batch_size and len(agent.memory2) > batch_size:
+                    agent.replay(batch_size)
+        except:
+            pass
             
         gw = player.world.get_map().generate_waypoints(20)
         actor_locations_x = [actor.get_location().x for actor in player.actor_list]
@@ -615,17 +643,23 @@ if __name__ == '__main__':
         plt.close()
 
         for actor in player.actor_list:
-            actor.destroy()
+            try:
+                actor.destroy()
+            except:
+                pass
 
         scores.append(score)
         avg_scores.append(np.mean(scores[-10:]))
 
         print('episode: ', episode, 'score %.2f' % score)
 
-        # Decay epsilon
-        if epsilon > MIN_EPSILON:
-            epsilon *= EPSILON_DECAY
-            epsilon = max(MIN_EPSILON, epsilon)
-
     print('Scores List: ', scores)
     print('Avg. Scores List: ', avg_scores)
+
+    # TODO:
+        # Run inference for 100 episodes each 6 mins
+        # Complete Test.py & add safety metric
+        # merge code into main
+
+    # NOTE: Future works:
+        # Improve reward calculation
