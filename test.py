@@ -52,7 +52,7 @@ if __name__ == '__main__':
         step = 1
 
         current_state = player.reset()
-        print('Current state: \n', current_state)
+        # print('Current state: \n', current_state)
         
         done = False
         episode_start = time.time()
@@ -73,7 +73,7 @@ if __name__ == '__main__':
             current_state = np.reshape(current_state, [-1, 1, state_height, state_width])
             current_state = np.array(current_state)
             action = agent.act([current_state, current_pos])
-            print('action taken: ', action)
+            # print('action taken: ', action)
 
             new_state, new_pos, reward, done, _ = player.step(action)
 
@@ -87,7 +87,7 @@ if __name__ == '__main__':
             score += reward
             
             current_state = new_state
-            print('new state: \n', current_state)
+            # print('new state: \n', current_state)
             current_pos = new_pos
             step += 1
 
@@ -114,7 +114,7 @@ if __name__ == '__main__':
             count += 1
             if count == 10:
                 agent.update_target_model()
-                print('target model updated')
+                # print('target model updated')
                 count = 0
 
             if len(agent.memory1) > batch_size and len(agent.memory2) > batch_size:

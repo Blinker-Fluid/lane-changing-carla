@@ -8,9 +8,9 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
-from agents.navigation.controller import VehiclePIDController
+from controller import VehiclePIDController
 
-from models.DQN import *
+from DQN import *
 
 #The added path depends on where the carla binaries are stored
 try:
@@ -23,7 +23,7 @@ except IndexError:
 
 import carla
 
-VEHICLE_VEL = 38
+VEHICLE_VEL = 30
 LEFT_LANE = 0
 CENTER_LANE = 1
 RIGHT_LANE = 2
@@ -42,8 +42,8 @@ class Player():
         self.model_3 = self.blp_lib.filter("model3")[0]
         # # Spawning ego car
         self.spectator = self.world.get_spectator()
-        self.initial_transform = carla.Transform(carla.Location(x=100.3564453125, y=-204.0, z=0.5),
-                                         carla.Rotation(pitch=0.000000, yaw=179.757080078125, roll=0.000000))
+        self.initial_transform = carla.Transform(carla.Location(x=-22.89981460571289, y=-203.97962951660156, z=2.79974365234375),
+                                                 carla.Rotation(pitch=0.000000, yaw=179.757080078125, roll=0.000000))
 
         self.vehicle = self.world.try_spawn_actor(self.model_3, self.initial_transform)
 
@@ -56,7 +56,8 @@ class Player():
         self.collision_hist = []
         self.steps_since_last_vehicle_spawn = 0
         self.pos = None
-
+        self.location_history = [self.vehicle.get_location()]
+        self.actor_location_history = []
         self.tm_port = 9500
         tm_is_initialized = False
         while not tm_is_initialized:
@@ -66,10 +67,10 @@ class Player():
                 self.tm.set_synchronous_mode(True)
                 tm_is_initialized = True
             except Exception as err:
-                print("Caught exception during traffic manager creation: ")
-                print(err)
+                # print("Caught exception during traffic manager creation: ")
+                # print(err)
                 self.tm_port += 1
-                print("Trying with port {}...".format(self.tm_port))
+                # print("Trying with port {}...".format(self.tm_port))
         # self.state = None
 
     def reset(self):
@@ -79,7 +80,7 @@ class Player():
         self.lane_index = CENTER_LANE
         self.vel_ref = VEHICLE_VEL
         self.waypointsList = []
-        
+        self.actor_location_history = []
         self.settings = self.world.get_settings()
         self.settings.synchronous_mode = True
         self.settings.fixed_delta_seconds = 1/20
@@ -93,6 +94,7 @@ class Player():
         while self.vehicle is None:
             self.vehicle = self.world.try_spawn_actor(self.model_3, self.initial_transform)
         self.world.tick()
+        self.location_history = [self.vehicle.get_location()]
 
         # self.current_pos = self.vehicle.get_transform().location
         # self.past_pos = self.vehicle.get_transform().location
@@ -184,7 +186,7 @@ class Player():
             
                 left_lane_next_wp = left_lane_next_wp.next(1)[0]
                 center_lane_next_wp = center_lane_next_wp.next(1)[0]
-                right_lane__next_wp = right_lane_next_wp.next(1)[0]
+                right_lane_next_wp = right_lane_next_wp.next(1)[0]
                 
             # if we didn't find the actor's lane, it must >30m behind the ego car
             if actor_lane == None:
@@ -206,10 +208,10 @@ class Player():
                 self.tm.set_synchronous_mode(True)
                 tm_is_initialized = True
             except Exception as err:
-                print("Caught exception during traffic manager creation: ")
-                print(err)
+                # print("Caught exception during traffic manager creation: ")
+                # print(err)
                 self.tm_port += 1
-                print("Trying with port {}...".format(self.tm_port))
+                # print("Trying with port {}...".format(self.tm_port))
 
         return self.state
 
@@ -226,16 +228,16 @@ class Player():
         reward = 0
         
         if len(self.collision_hist) != 0:
-            print("step func detected collision")
+            # print("step func detected collision")
             done = True
             reward -= 10
             return self.state, self.pos, reward, done, None
-        elif kmh < 50:
+        elif kmh < VEHICLE_VEL:
             done = False
             reward -= 1
         else:
             done = False
-            reward += 1
+            reward += 3
 
         self.controller = VehiclePIDController(self.vehicle,
                                         args_lateral=args_lateral_dict,
@@ -252,15 +254,15 @@ class Player():
                 self.do_left_lane_change()
             else:
                 self.do_follow_lane()
-                reward -= 5
+                reward -= 3
         elif action == 2:
             if (self.lane_index != RIGHT_LANE):
                 self.do_right_lane_change()
             else:
                 self.do_follow_lane()
-                reward -= 5
+                reward -= 3
 
-        if self.steps_since_last_vehicle_spawn >= 2:
+        if self.steps_since_last_vehicle_spawn >= 4:
             self.spawn_vehicle()
             self.steps_since_last_vehicle_spawn = 0
         self.steps_since_last_vehicle_spawn += 1
@@ -312,28 +314,33 @@ class Player():
             _loc = spawn_transform.location
             spawn_transform.location = carla.Location(_loc.x, _loc.y, _loc.z + 0.5)
             actor_vehicle = self.world.spawn_actor(self.model_3, spawn_transform)
-            print("spawned actor")
+            # print("spawned actor")
             self.vehicle_list.append(actor_vehicle)
             self.actor_list.append(actor_vehicle)
             actor_vehicle.set_autopilot(True, self.tm_port)  # you can get those functions detail in carla document
             # self.tm.ignore_lights_percentage(actor_vehicle, 0)
-            # self.tm.distance_to_leading_vehicle(actor_vehicle, 0.5)
+            self.tm.distance_to_leading_vehicle(actor_vehicle, 50)
             # self.tm.vehicle_percentage_speed_difference(actor_vehicle, -20)
         except:
-            print('failed appending new vehicle actor!')  # if failed, print the hints.
+            # print('failed appending new vehicle actor!')  # if failed, print the hints.
             pass
 
     # sensor print functions
     def collision_data(self, event):
-        print("Collision detected:\n" + str(event) + '\n')
+        # print("Collision detected:\n" + str(event) + '\n')
         self.collision_hist.append(event)
+        # print(event)
+        # print(event.other_actor)
+        # print(event.other_actor.type_id)
         self.ego_col.stop()
 
     def lane_callback(lane):
-        print("Lane invasion detected:\n"+str(lane)+'\n')
+        pass
+        # print("Lane invasion detected:\n"+str(lane)+'\n')
 
     def obs_callback(obs):
-        print("Obstacle detected:\n"+str(obs)+'\n')
+        pass
+        # print("Obstacle detected:\n"+str(obs)+'\n')
 
     def dist_to_waypoint(self, waypoint):
         vehicle_transform = self.vehicle.get_transform()
@@ -343,7 +350,7 @@ class Player():
         waypoint_y = waypoint.transform.location.y
         return math.sqrt((vehicle_x - waypoint_x)**2 + (vehicle_y - waypoint_y)**2)
     
-    def go_to_waypoint(self, waypoint, draw_waypoint = True, threshold = 0.3):
+    def go_to_waypoint(self, waypoint, draw_waypoint = True, threshold = 2):
         if draw_waypoint : 
             self.world.debug.draw_string(waypoint.transform.location, 'O', draw_shadow=False,
                                                        color=carla.Color(r=255, g=0, b=0), life_time=10.0,
@@ -355,29 +362,30 @@ class Player():
         vec2wp = waypoint_np - current_pos_np
         motion_vec = current_pos_np - past_pos_np
         dot = np.dot(vec2wp, motion_vec)
-
-        if (dot >=0):
-            while(self.dist_to_waypoint(waypoint) > threshold) :
+        # if (dot >=0):
+        if True:
+            while(self.dist_to_waypoint(waypoint) > threshold):
                 control_signal = self.controller.run_step(self.vel_ref,waypoint) 
                 self.vehicle.apply_control(control_signal)
                 if len(self.collision_hist) != 0:
                     return
+                self.location_history.append(self.vehicle.get_location())
                 self.update_spectator()
 
-    def get_left_lane_waypoints(self, offset = 2*VEHICLE_VEL):
+    def get_left_lane_waypoints(self, offset = VEHICLE_VEL):
         # TODO: Check if lane direction is the same as current direction
         current_waypoint = self.world.get_map().get_waypoint(self.vehicle.get_location())
         left_lane_target = current_waypoint.get_left_lane().next(offset)[0]
         left_lane_follow = left_lane_target.next(offset)[0]
         self.waypointsList = [left_lane_target, left_lane_follow]
 
-    def get_right_lane_waypoints(self, offset = 2*VEHICLE_VEL):
+    def get_right_lane_waypoints(self, offset = VEHICLE_VEL):
         current_waypoint = self.world.get_map().get_waypoint(self.vehicle.get_location())
         right_lane_target = current_waypoint.get_right_lane().next(offset)[0]
         right_lane_follow = right_lane_target.next(offset)[0]
         self.waypointsList = [right_lane_target, right_lane_follow]
     
-    def get_current_lane_waypoints(self, offset = 2*VEHICLE_VEL):
+    def get_current_lane_waypoints(self, offset = VEHICLE_VEL):
         current_waypoint = self.world.get_map().get_waypoint(self.vehicle.get_location())
         target_wp = current_waypoint.next(offset)[0]
         follow_wp = target_wp.next(offset)[0]
@@ -386,6 +394,7 @@ class Player():
     def do_left_lane_change(self):
         self.lane_index -= 1
         self.get_left_lane_waypoints()
+        self.actor_location_history += [a.get_location() for a in self.vehicle_list]
         for i in range(len(self.waypointsList)-1):
             self.current_pos = self.vehicle.get_location()
             self.go_to_waypoint(self.waypointsList[i])
@@ -395,6 +404,7 @@ class Player():
     def do_right_lane_change(self):
         self.lane_index += 1
         self.get_right_lane_waypoints()
+        self.actor_location_history += [a.get_location() for a in self.vehicle_list]
         for i in range(len(self.waypointsList)-1):
             self.current_pos = self.vehicle.get_location()
             self.go_to_waypoint(self.waypointsList[i])
@@ -405,9 +415,6 @@ class Player():
         self.get_current_lane_waypoints()
         ego_wp = self.world.get_map().get_waypoint(self.vehicle.get_location())
         for i in range(len(self.waypointsList)-1):
-            # dist = dist_to_waypoint(self.waypointsList[i])
-            # check_wp = 
-            # for j in range(2, dist):
             # check if we need to slow down
             # set next wp at half the distance to vehicle ahead
             # go there
@@ -513,10 +520,11 @@ class Player():
 
 ######## Training Loop ########
 if __name__ == '__main__':
+    run_start = datetime.now().strftime("%d_%m_%Y_%H_%M")
     state_height = 45
     state_width = 3
     action_size = 3
-    EPISODES = 100
+    EPISODES = 1
     batch_size = 16
     SECONDS_PER_EPISODE = 6 * 60
     count = 0
@@ -540,18 +548,16 @@ if __name__ == '__main__':
 
     scores = []
     avg_scores = []
-    locations = []
     print('Initializing training loop: ')
     for episode in tqdm(range(1, EPISODES + 1), unit='episodes'):
-        locations = []
-        print('Starting a new episode!')
+        # print('Starting a new episode!')
         player.collision_hist = []
 
         score = 0
         step = 1
 
         current_state = player.reset()
-        print('Current state: \n', current_state)
+        # print('Current state: \n', current_state)
         
         done = False
         episode_start = time.time()
@@ -573,7 +579,7 @@ if __name__ == '__main__':
                 current_state = np.reshape(current_state, [-1, 1, state_height, state_width])
                 current_state = np.array(current_state)
                 action = agent.act([current_state, current_pos])
-                print('action taken: ', action)
+                # print('action taken: ', action)
 
                 new_state, new_pos, reward, done, _ = player.step(action)
 
@@ -581,25 +587,22 @@ if __name__ == '__main__':
                     agent.remember1(current_state, action, reward, new_state, done)
                 else:
                     agent.remember2(current_state, action, reward, new_state, done)
-
-                loc = player.vehicle.get_location()
-                locations.append(loc)
                 score += reward
                 
                 current_state = new_state
-                print('new state: \n', current_state)
+                # print('new state: \n', current_state)
                 current_pos = new_pos
                 step += 1
 
                 if done:
                     agent.save("models/" + str(episode) + ".h5")
-                    print("weight saved")
-                    print("episode: {}, epsilon: {}".format(episode, agent.epsilon))
-                    with open('models/train.txt', 'a') as f:
+                    # print("weight saved")
+                    # print("episode: {}, epsilon: {}".format(episode, agent.epsilon))
+                    with open("models/train.txt", "a") as f:
                         f.write(" episode {} epsilon {}\n".format(episode, agent.epsilon))
-                    with open('models/trainexp1.pkl', 'wb') as exp1:
+                    with open("models/trainexp1.pkl", "wb") as exp1:
                         pickle.dump(agent.memory1, exp1)
-                    with open('models/exp2.pkl', 'wb') as exp2:
+                    with open("models/exp2.pkl", "wb") as exp2:
                         pickle.dump(agent.memory2, exp2)
 
                     episode = episode + 1
@@ -614,7 +617,7 @@ if __name__ == '__main__':
                 count += 1
                 if count == 10:
                     agent.update_target_model()
-                    print('target model updated')
+                    # print('target model updated')
                     count = 0
 
                 if len(agent.memory1) > batch_size and len(agent.memory2) > batch_size:
@@ -623,23 +626,29 @@ if __name__ == '__main__':
             pass
             
         gw = player.world.get_map().generate_waypoints(20)
-        actor_locations_x = [actor.get_location().x for actor in player.actor_list]
-        actor_locations_y = [actor.get_location().y for actor in player.actor_list]
-
         X_W = [w.transform.location.x for w in gw]
         Y_W = [w.transform.location.y for w in gw]
 
         plt.figure()
-        plt.scatter(X_W, Y_W, c="black", s=0.5)
-
+        plt.scatter(X_W, Y_W, c="black", s=0.25, alpha=0.1)
+        locations = player.location_history
         X = [loc.x for loc in locations]
         Y = [loc.y for loc in locations]
+
+        actor_hist = player.actor_location_history
+        actor_hist_x = [loc.x for loc in actor_hist]
+        actor_hist_y = [loc.y for loc in actor_hist]
 
         plt.plot(X, Y, c="green", linewidth=0.5)
         plt.scatter(X[0], Y[0], c="red", s=1)
         plt.scatter(X[-1], Y[-1], c="blue", s=1)
+        plt.scatter(actor_hist_x, actor_hist_y, c="purple", s=0.5, alpha=0.5)
+        
+        actor_locations_x = [actor.get_location().x for actor in player.vehicle_list if actor.is_alive]
+        actor_locations_y = [actor.get_location().y for actor in player.vehicle_list if actor.is_alive]
         plt.scatter(actor_locations_x, actor_locations_y, c="purple", s=1)
-        plt.savefig("visualizations/" + datetime.now().strftime("%d_%m_%Y_%H_%M_%S") + ".png", dpi=300, transparent=True)
+    
+        plt.savefig("visualizations/" + run_start + "_" + str(episode) + ".png", dpi=300, transparent=True)
         plt.close()
 
         for actor in player.actor_list:
@@ -651,15 +660,13 @@ if __name__ == '__main__':
         scores.append(score)
         avg_scores.append(np.mean(scores[-10:]))
 
-        print('episode: ', episode, 'score %.2f' % score)
+        # print('episode: ', episode, 'score %.2f' % score)
 
     print('Scores List: ', scores)
     print('Avg. Scores List: ', avg_scores)
 
-    # TODO:
-        # Run inference for 100 episodes each 6 mins
-        # Complete Test.py & add safety metric
-        # merge code into main
+    with open("scores.txt", "a") as f:
+        f.write(" Scores List: {}\n".format(scores))
 
-    # NOTE: Future works:
-        # Improve reward calculation
+    with open("avg_scores.txt", "a") as f:
+        f.write(" Scores List: {}\n".format(avg_scores))
