@@ -23,7 +23,6 @@ import tensorflow.compat.v1 as tf
 # set_session(tf.Session(config=config))
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
-# from carla_env.new_env import *
 tf.disable_v2_behavior()
 
 class DQNAgent:
@@ -34,7 +33,7 @@ class DQNAgent:
         self.action_size = action_size
         self.memory1 = deque(maxlen=20000)
         self.memory2 = deque(maxlen=20000)
-        # self.memory3 = deque(maxlen=20000)
+        self.memory3 = deque(maxlen=20000)
         self.gamma = 0.90    # discount rate
         self.epsilon = 1.0   # exploration rate
         self.epsilon_min = 0.3
@@ -101,23 +100,13 @@ class DQNAgent:
         minibatch = minibatch1 + minibatch2
 
         for state, action, reward, next_state, done in minibatch:
-            # if not done:
             # print(state.shape)
             next_state = np.reshape(next_state, [-1, 1, self.state_height, self.state_width])
             # print(next_state.shape)
-            # pos = [0, 0, 0]
-            # pos = np.reshape(pos, [1, 3])
-            # target = self.model.predict((state, pos))
             target = self.model.predict(state)
             t = self.target_model.predict(next_state)[0]
             target[0][action] = reward + self.gamma * np.amax(t)
             self.model.fit(state, target, epochs=1, verbose=0)
-            # else:
-            #     target = self.model.predict(state)
-            #     target[0][action] = reward
-
-        if self.epsilon > self.epsilon_min:
-            self.epsilon = max(self.epsilon*self.epsilon_decay, self.epsilon_min)
 
     def load(self, name):
         self.model.load_weights(name)

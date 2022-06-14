@@ -531,8 +531,7 @@ if __name__ == '__main__':
     player = Player()
     agent.epsilon = 0.0
     agent.epsilon_min = 0.0
-    agent.load("/kuacc/users/madi21/comp523/project/lane-changing-carla/models/500.h5") 
-
+    agent.load("/kuacc/users/madi21/comp523/project/lane-changing-carla/models/615.h5") 
 
     ego_speed = player.vehicle.get_velocity()
     ego_lane = player.lane_index
@@ -596,8 +595,6 @@ if __name__ == '__main__':
                 step += 1
 
                 if done:
-                    # agent.save("models/405.h5")
-                    # print("weight saved")
                     # print("episode: {}".format(episode))
                     episode = episode + 1
                     break
@@ -644,7 +641,6 @@ if __name__ == '__main__':
 
     print('Scores List: ', scores)
     print('Avg. Scores List: ', avg_scores)
-    print('Collision Hist: ', player.collision_hist)
 
     with open("scores.txt", "a") as f:
         f.write(" Scores List: {}\n".format(scores))
